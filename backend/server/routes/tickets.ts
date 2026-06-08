@@ -20,7 +20,7 @@ const TICKET_PRIORITY: Record<number, string> = {
 function normalizeTicket(item: any) {
   return {
     id:          item.id,
-    ref_ticket:  item.id,
+    ref_ticket:  item.external_id || item.id,  // Use external_id (CSV Ref) if available, otherwise GLPI id
     date:        item.date         || '',
     type:        TICKET_TYPE[item.type]           || item.type       || 'Incident',
     titre:       item.name         || '',

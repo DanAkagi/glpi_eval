@@ -32,7 +32,10 @@ router.get('/', async (req: Request, res: Response) => {
   for (const itemType of typesToQuery) {
     if (!(ASSET_ITEM_TYPES as readonly string[]).includes(itemType)) continue;
     try {
-      const params: Record<string, any> = { limit: 10000 };
+      const params: Record<string, any> = { 
+        limit: 10000,
+        expand_states: true  // Expand status field to get name
+      };
       if (name) params.filter = `name=ilike=${name}`;
 
       const response = await glpiApiService.get(`/Assets/${itemType}`, params);
@@ -61,7 +64,7 @@ router.get('/:itemtype/:id', async (req: Request, res: Response) => {
   }
 
   try {
-    const response = await glpiApiService.get(`/Assets/${glpiType}/${id}`);
+    const response = await glpiApiService.get(`/Assets/${glpiType}/${id}`, { expand_states: true });
     if (!response) return res.status(404).json({ error: 'Asset not found' });
     res.json(normalizeAsset(response, glpiType));
   } catch (error) {
@@ -77,7 +80,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   const types = await glpiApiService.getAssetItemTypes();
   for (const itemType of types) {
     try {
-      const response = await glpiApiService.get(`/Assets/${itemType}/${id}`);
+      const response = await glpiApiService.get(`/Assets/${itemType}/${id}`, { expand_states: true });
       if (response) return res.json(normalizeAsset(response, itemType));
     } catch { /* not found in this type, try next */ }
   }

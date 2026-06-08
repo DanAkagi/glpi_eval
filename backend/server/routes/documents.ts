@@ -23,7 +23,7 @@ router.post('/', upload.single('file'), async (req: Request, res: Response) => {
     formData.append('uploadFile', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
     formData.append('filename', req.file.originalname);
 
-    const response = await glpiApiService.post('/Document', formData);
+    const response = await glpiApiService.post('/Management/Document', formData);
     res.json(response);
   } catch (error) {
     console.error('Failed to upload document:', error);

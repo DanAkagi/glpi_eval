@@ -138,12 +138,12 @@ const loadImages = async () => {
     images.value = [];
     for (const filename of possibleFilenames) {
       try {
-        const response = await fetch(`http://localhost:3001/public/images/${filename}`, { method: 'HEAD' });
+        const response = await fetch(`http://localhost:3001/images/${filename}`, { method: 'HEAD' });
         if (response.ok) {
           images.value.push({
             id: filename,
             filename: filename,
-            download_url: `http://localhost:3001/public/images/${filename}`
+            download_url: `http://localhost:3001/images/${filename}`
           });
         }
       } catch (error) {

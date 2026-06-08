@@ -557,8 +557,13 @@ router.post('/all', upload.fields([
     const assetNameMap: Record<string, { id: number; itemType: string }> = {};
     assetRecords.forEach((rec: any, idx: number) => {
       const asset = createdAssets[idx];
-      if (asset) assetNameMap[rec.Name?.trim().toLowerCase()] = asset;
+      if (asset) {
+        const key = rec.Name?.trim().toLowerCase();
+        assetNameMap[key] = asset;
+        console.log(`[IMPORT ALL] Mapped asset "${rec.Name}" (key: "${key}") → ID ${asset.id}, Type ${asset.itemType}`);
+      }
     });
+    console.log(`[IMPORT ALL] Asset name map keys:`, Object.keys(assetNameMap));
 
     for (const entry of entries) {
       if (entry.isDirectory || !entry.entryName.startsWith('images/')) continue;
@@ -597,6 +602,7 @@ router.post('/all', upload.fields([
 
         // 4c. Link document to matching asset (filename without extension = asset Name)
         const baseName = path.parse(filename).name.toLowerCase();
+        console.log(`[IMPORT ALL] Looking for asset with key "${baseName}" from filename "${filename}"`);
         const matchedAsset = assetNameMap[baseName];
 
         if (matchedAsset) {
