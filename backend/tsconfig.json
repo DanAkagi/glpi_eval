@@ -1,35 +1,19 @@
 {
   "compilerOptions": {
-    /* Mise en page des fichiers */
-    "rootDir": "./src",                         // Où se trouve votre code source
-    "outDir": "./dist",                        // Où le code compilé sera généré
-    "removeComments": true,                    // Allège le fichier final
-
-    /* Paramètres d'environnement */
-    "module": "NodeNext",                      // Indispensable pour l'ESM moderne
-    "moduleResolution": "NodeNext",
-    "target": "ESNext",                        // Utilise les dernières fonctionnalités JS
-    "lib": ["ESNext"],
-    "types": ["node"],                         // Permet à TS de comprendre 'process', 'path', etc.
-
-    /* Sorties supplémentaires */
-    "sourceMap": true,                         // Utile pour le debug
-    "declaration": true,                       // Génère les fichiers .d.ts
-    "declarationMap": true,
-
-    /* Options de style et rigueur */
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022"],
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "outDir": "./dist",
+    "rootDir": "./server",
     "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,                    // Évite de laisser du code mort
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-
-    /* Recommandations modernes */
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
+    "esModuleInterop": true,
     "skipLibCheck": true,
-    "esModuleInterop": true                    // Important pour l'import de certaines libs CommonJS
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
   },
-  "include": ["src/**/*"],                     // Ne compile que ce qui est dans src
-  "exclude": ["node_modules", "dist", "**/*.test.ts"] 
+  "include": ["server/**/*"],
+  "exclude": ["node_modules"]
 }
