@@ -10,8 +10,9 @@ import { glpiApiService, CSV_TYPE_TO_GLPI, AssetItemType } from '../services/glp
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Images extraction target (served as static files)
 const IMAGES_DIR = path.resolve(process.cwd(), 'public', 'images');
+
+// ── CSV Parser ────────────────────────────────────────────────────────────────
 
 function parseCSV(buffer: Buffer): Promise<any[]> {
   return new Promise((resolve, reject) => {
@@ -24,23 +25,194 @@ function parseCSV(buffer: Buffer): Promise<any[]> {
   });
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── GLPI Entity Resolution (getOrCreate pattern) ──────────────────────────────
+//
+// GLPI relational fields (locations_id, manufacturers_id, etc.) require
+// numeric IDs pointing to existing records. Passing a plain string is silently
+// ignored.  For each entity type we:
+//   1. Search for an existing record matching the name (case-insensitive).
+//   2. If found  → return its id.
+//   3. If not    → create it and return the new id.
+//
+// Results are cached in-memory per import run to avoid duplicate API calls.
 
-// Map CSV Status string → GLPI State id
-function mapStatus(status: string): { id: number } | undefined {
-  const map: Record<string, number> = {
-    'En production': 1,
-    'En stock':      2,
-    'En réparation': 3,
-    'Hors service':  4,
-    'Volé':          5,
-    'Perdu':         6,
-  };
-  const id = map[status?.trim()];
-  return id ? { id } : undefined;
+const cache: Record<string, Record<string, number>> = {
+  location: {},
+  manufacturer: {},
+  computermodel: {},
+  monitormodel: {},
+  peripheralmodel: {},
+  phonemodel: {},
+  printermodel: {},
+  networkequipmentmodel: {},
+  user: {},
+};
+
+async function resolveId(
+  entityType: string,
+  apiPath: string,
+  name: string
+): Promise<number | undefined> {
+  if (!name?.trim()) return undefined;
+  const key = name.trim().toLowerCase();
+
+  if (cache[entityType]?.[key] !== undefined) {
+    return cache[entityType][key];
+  }
+
+  // Search existing
+  try {
+    const results = await glpiApiService.get(apiPath, {
+      filter: `name==${name.trim()}`,
+      limit: 1,
+    });
+    if (Array.isArray(results) && results.length > 0) {
+      const id = results[0].id as number;
+      cache[entityType][key] = id;
+      return id;
+    }
+  } catch { /* not found or endpoint error, try create */ }
+
+  // Create — Location and other tree dropdowns require entity:{id:0}
+  const isHierarchical = ['location'].includes(entityType);
+  const createPayload: Record<string, any> = { name: name.trim() };
+  if (isHierarchical) createPayload.entity = { id: 0 };
+
+  try {
+    const created = await glpiApiService.post(apiPath, createPayload);
+    const id = created.id as number;
+    if (!cache[entityType]) cache[entityType] = {};
+    cache[entityType][key] = id;
+    console.log(`[GLPI] Created ${entityType} "${name.trim()}" → ID ${id}`);
+    return id;
+  } catch (e: any) {
+    console.warn(`[GLPI] Could not create ${entityType} "${name}": ${e?.response?.data?.title || e?.message}`);
+    return undefined;
+  }
 }
 
-// Map CSV Priority string → GLPI int (1–5)
+// Per-itemtype model endpoint — all under /Dropdowns/ (not /Assets/)
+function modelApiPath(itemType: AssetItemType): string {
+  const map: Record<string, string> = {
+    Computer:           '/Dropdowns/ComputerModel',
+    Monitor:            '/Dropdowns/MonitorModel',
+    Peripheral:         '/Dropdowns/PeripheralModel',
+    Phone:              '/Dropdowns/PhoneModel',
+    Printer:            '/Dropdowns/PrinterModel',
+    NetworkEquipment:   '/Dropdowns/NetworkEquipmentModel',
+    SoftwareLicense:    '/Dropdowns/ComputerModel', // no dedicated SoftwareModel in Dropdowns
+    Appliance:          '/Dropdowns/ComputerModel',
+    Unmanaged:          '/Dropdowns/ComputerModel',
+    Certificate:        '/Dropdowns/ComputerModel',
+  };
+  return map[itemType] || '/Dropdowns/ComputerModel';
+}
+
+function modelCacheKey(itemType: AssetItemType): string {
+  return (itemType.toLowerCase() + 'model') as string;
+}
+
+// Resolve user by full name (CSV format: "Firstname Lastname" or "Lastname Firstname")
+// GLPI stores firstname and realname separately — we try multiple combinations.
+async function resolveUserId(name: string): Promise<number | undefined> {
+  if (!name?.trim()) return undefined;
+  const key = name.trim().toLowerCase();
+  if (cache.user[key] !== undefined) {
+    return cache.user[key] === -1 ? undefined : cache.user[key];
+  }
+
+  const parts = name.trim().split(/\s+/);
+
+  // Strategy 1: exact username match
+  try {
+    const r = await glpiApiService.get('/Administration/User', {
+      filter: `username==${name.trim()}`, limit: 1,
+    });
+    if (Array.isArray(r) && r.length > 0) { cache.user[key] = r[0].id; return r[0].id; }
+  } catch { /* continue */ }
+
+  // Strategy 2: "Firstname Lastname" → firstname=X;realname=Y
+  if (parts.length >= 2) {
+    const [first, ...rest] = parts;
+    const last = rest.join(' ');
+
+    // Try Firstname Lastname
+    try {
+      const r = await glpiApiService.get('/Administration/User', {
+        filter: `firstname=ilike=${first};realname=ilike=${last}`,
+        limit: 1,
+      });
+      if (Array.isArray(r) && r.length > 0) { cache.user[key] = r[0].id; return r[0].id; }
+    } catch { /* continue */ }
+
+    // Try Lastname Firstname (reversed)
+    try {
+      const r = await glpiApiService.get('/Administration/User', {
+        filter: `realname=ilike=${first};firstname=ilike=${last}`,
+        limit: 1,
+      });
+      if (Array.isArray(r) && r.length > 0) { cache.user[key] = r[0].id; return r[0].id; }
+    } catch { /* continue */ }
+  }
+
+  // Strategy 3: partial match on realname (last part of full name)
+  if (parts.length > 0) {
+    try {
+      const lastName = parts[parts.length - 1];
+      const r = await glpiApiService.get('/Administration/User', {
+        filter: `realname=ilike=${lastName}`, limit: 1,
+      });
+      if (Array.isArray(r) && r.length > 0) { cache.user[key] = r[0].id; return r[0].id; }
+    } catch { /* continue */ }
+  }
+
+  // Strategy 4: create user from full name
+  console.warn(`[GLPI] User "${name}" not found — creating user from full name`);
+  try {
+    const nameParts = name.trim().split(/\s+/);
+    // slug username: lowercase, no accents, joined with dot
+    const slug = name.trim()
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, '.');
+
+    const newUser = await glpiApiService.post('/Administration/User', {
+      username:  slug,
+      realname:  nameParts.length > 1 ? nameParts.slice(1).join(' ') : name.trim(),
+      firstname: nameParts[0],
+      is_active: true,
+      password:  'ChangeMe123!',
+      password2: 'ChangeMe123!',
+    });
+    const id = newUser.id as number;
+    cache.user[key] = id;
+    console.log(`[GLPI] Created user "${name}" (${slug}) → ID ${id}`);
+    return id;
+  } catch (e: any) {
+    console.warn(`[GLPI] Could not create user "${name}": ${e?.response?.data?.title || e?.message} — asset will have no user`);
+    cache.user[key] = -1; // mark as unresolvable to avoid retrying
+    return undefined;
+  }
+}
+
+// ── Value Mappers ──────────────────────────────────────────────────────────────
+
+// CSV Status → GLPI states_id (numeric)
+// These IDs match the default GLPI state records created on install.
+function mapStatesId(status: string): number | undefined {
+  const map: Record<string, number> = {
+    'En production':  1,
+    'En stock':       2,
+    'En réparation':  3,
+    'En panne':       3, // map to "En réparation" by default
+    'Hors service':   4,
+    'Volé':           5,
+    'Perdu':          6,
+    'Maintenance':    3,
+  };
+  return map[status?.trim()];
+}
+
 function mapPriority(priority: string): number {
   const map: Record<string, number> = {
     'Very Low': 1, 'Low': 2, 'Medium': 3, 'High': 4, 'Very High': 5,
@@ -49,147 +221,136 @@ function mapPriority(priority: string): number {
   return map[priority?.trim()] ?? 3;
 }
 
-// Parse CSV date/time in European format (DD/MM/YYYY HH:mm) to GLPI format (YYYY-MM-DD HH:mm:ss)
-function parseCsvDateTime(dateStr: string, timeStr: string): string {
-  if (!dateStr) return new Date().toISOString().slice(0, 19).replace('T', ' ');
-  
-  // Parse DD/MM/YYYY format
-  const parts = dateStr.trim().split('/');
-  if (parts.length === 3) {
-    const day = parts[0].padStart(2, '0');
-    const month = parts[1].padStart(2, '0');
-    const year = parts[2];
-    
-    const time = timeStr ? timeStr.trim() : '00:00';
-    // Return GLPI format: YYYY-MM-DD HH:mm:ss
-    return `${year}-${month}-${day} ${time}:00`;
-  }
-  
-  return dateStr; // Fallback if format doesn't match
-}
-
-// Map CSV Type string → GLPI ticket type int (1=Incident, 2=Request)
 function mapTicketType(type: string): number {
   if (!type) return 1;
   const t = type.trim().toLowerCase();
-  if (t === 'request' || t === 'demande') return 2;
-  return 1; // Incident by default
+  return (t === 'request' || t === 'demande') ? 2 : 1;
 }
 
-// Map CSV Status string → GLPI ticket status id
 function mapTicketStatus(status: string): number {
   const map: Record<string, number> = {
-    'New':     1, 'Nouveau': 1,
+    'New': 1, 'Nouveau': 1,
     'Assigned': 2, 'Attribué': 2,
-    'Planned':  3, 'Planifié': 3,
-    'Waiting':  4, 'En attente': 4,
-    'Solved':   5, 'Résolu': 5,
-    'Closed':   6, 'Clos': 6,
+    'Planned': 3, 'Planifié': 3,
+    'Waiting': 4, 'En attente': 4,
+    'Solved': 5, 'Résolu': 5,
+    'Closed': 6, 'Clos': 6,
   };
   return map[status?.trim()] ?? 1;
 }
 
-// Build asset payload from CSV record (Feuille 1)
-function buildAssetPayload(record: any) {
+function parseCsvDateTime(dateStr: string, timeStr: string): string {
+  if (!dateStr) return new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const parts = dateStr.trim().split('/');
+  if (parts.length === 3) {
+    const [day, month, year] = parts;
+    const time = timeStr?.trim() || '00:00';
+    return `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')} ${time}:00`;
+  }
+  return dateStr;
+}
+
+// ── Asset Payload Builder (async: resolves all IDs) ───────────────────────────
+
+async function buildAssetPayload(record: any, itemType: AssetItemType): Promise<Record<string, any>> {
   const payload: Record<string, any> = {
-    name: record.Name || '',
-    entity: { id: 0 },
-    otherserial: record.Inventory_Number || '', // Exact CSV column name
+    name:        record.Name?.trim() || '',
+    entity:      { id: 0 },
+    otherserial: record.Inventory_Number?.trim() || '',
   };
-  const status = mapStatus(record.Status); // Exact CSV column name
-  if (status) payload.status = status;
-  // GLPI API accepts objects with name property for auto-creation/matching
-  if (record.Location)     payload.locations_id     = { name: record.Location }; // Exact CSV column name
-  if (record.Manufacturer) payload.manufacturers_id = { name: record.Manufacturer }; // Exact CSV column name
-  if (record.Model)        payload.models_id        = { name: record.Model }; // Exact CSV column name
-  if (record.User)         payload.users_id         = { name: record.User }; // Exact CSV column name
+
+  // status — object {id} matching the State schema field name
+  const statesId = mapStatesId(record.Status);
+  if (statesId !== undefined) payload.status = { id: statesId };
+
+  // Relational fields — High-Level API uses nested objects {id}, NOT _id integer fields
+  const locationId = await resolveId('location', '/Dropdowns/Location', record.Location);
+  if (locationId !== undefined) payload.location = { id: locationId };
+
+  const manufacturerId = await resolveId('manufacturer', '/Dropdowns/Manufacturer', record.Manufacturer);
+  if (manufacturerId !== undefined) payload.manufacturer = { id: manufacturerId };
+
+  const modelId = await resolveId(modelCacheKey(itemType), modelApiPath(itemType), record.Model);
+  if (modelId !== undefined) payload.model = { id: modelId };
+
+  const userId = await resolveUserId(record.User);
+  if (userId !== undefined) payload.user = { id: userId };
+
   return payload;
 }
 
-// Build ticket payload from CSV record (Feuille 2)
-function buildTicketPayload(record: any) {
-  const dateTime = parseCsvDateTime(record.Date, record.Heure);
+// ── Ticket Payload Builder ─────────────────────────────────────────────────────
 
+function buildTicketPayload(record: any): Record<string, any> {
   const payload: Record<string, any> = {
-    name:     record.Titre || record.Title || '',
-    content:  record.Description || '',
-    type:     mapTicketType(record.Type),
-    status:   { id: mapTicketStatus(record.Status || 'New') },
-    priority: mapPriority(record.Priority || 'Medium'),
-    date:     dateTime,
+    name:        record.Titre?.trim() || record.Title?.trim() || '',
+    content:     record.Description?.trim() || '',
+    type:        mapTicketType(record.Type),
+    status:      mapTicketStatus(record.Status || 'New'),
+    priority:    mapPriority(record.Priority || 'Medium'),
+    date:        parseCsvDateTime(record.Date, record.Heure),
+    // Store CSV Ref_Ticket in external_id for traceability (GLPI auto-assigns its own id)
+    external_id: record.Ref_Ticket ? String(record.Ref_Ticket).trim() : undefined,
   };
 
-  // Store CSV reference as external_id to preserve original ticket number
-  if (record.Ref_Ticket) {
-    payload.external_id = record.Ref_Ticket;
-  }
+  // Remove undefined
+  Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
 
+  // _item_names stored separately — used for asset linking after ticket creation
   if (record.Items) {
     try {
       const items: string[] = JSON.parse(record.Items);
-      if (Array.isArray(items) && items.length > 0) {
-        // items[] sent as asset names; GLPI expects linked items via separate endpoint
-        // Store as external_id for later linking if needed
-        payload._item_names = items;
-      }
-    } catch { /* malformed JSON, skip */ }
+      if (Array.isArray(items) && items.length > 0) payload._item_names = items;
+    } catch { /* malformed JSON */ }
   }
 
   return payload;
 }
 
-// Build TicketCost payload from CSV record (Feuille 3)
-function buildCostPayload(record: any) {
+// ── Cost Payload Builder ───────────────────────────────────────────────────────
+// The ticket id goes in the URL, NOT the body.
+
+function buildCostPayload(record: any, csvRef: string): Record<string, any> {
   return {
-    ticket:        { id: parseInt(record.Num_Ticket) },
-    name:          `Cost - Ticket ${record.Num_Ticket}`,
+    name:          `Cost - Ticket ${csvRef}`,
     duration:      parseInt(record.Duration_second) || 0,
-    cost_time:     parseFloat((record.Time_Cost || '0').replace(',', '.')) || 0,
-    cost_fixed:    parseFloat(record.Fixed_Cost)  || 0,
+    cost_time:     parseFloat((record.Time_Cost  || '0').replace(',', '.')) || 0,
+    cost_fixed:    parseFloat((record.Fixed_Cost || '0').replace(',', '.')) || 0,
     cost_material: 0,
   };
 }
 
-// ── Routes ───────────────────────────────────────────────────────────────────
+// ── Image helper ──────────────────────────────────────────────────────────────
 
-// POST /import/assets  (Feuille 1)
+function getMimeType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  return ({ '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+            '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp' })[ext] || 'image/jpeg';
+}
+
+// ── Individual routes ─────────────────────────────────────────────────────────
+
 router.post('/assets', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  console.log('[IMPORT ASSETS] Starting import...');
   const records = await parseCSV(req.file.buffer);
-  console.log(`[IMPORT ASSETS] Parsed ${records.length} records from CSV`);
-
   let ok = 0;
   const errors: string[] = [];
 
   for (const record of records) {
-    // Resolve GLPI itemtype from CSV Item_Type column
-    const csvType: string = record.Item_Type || 'Computer';
-    const itemType: AssetItemType = CSV_TYPE_TO_GLPI[csvType] || 'Computer';
-
-    console.log(`[IMPORT ASSETS] Processing record: ${record.Name}`);
-    console.log(`[IMPORT ASSETS] CSV Type: ${csvType} -> GLPI Type: ${itemType}`);
-    console.log(`[IMPORT ASSETS] Record data:`, record);
-
+    const itemType: AssetItemType = CSV_TYPE_TO_GLPI[record.Item_Type || ''] || 'Computer';
     try {
-      const payload = buildAssetPayload(record);
-      console.log(`[IMPORT ASSETS] Payload for ${record.Name}:`, payload);
-      
-      const response = await glpiApiService.post(`/Assets/${itemType}`, payload);
-      console.log(`[IMPORT ASSETS] Successfully created ${record.Name} with ID: ${response.id}`);
+      const payload = await buildAssetPayload(record, itemType);
+      await glpiApiService.post(`/Assets/${itemType}`, payload);
       ok++;
     } catch (e: any) {
-      console.error(`[IMPORT ASSETS] Failed to create ${record.Name}:`, e?.response?.data || e?.message);
       errors.push(`${record.Name} (${itemType}): ${e?.response?.data?.title || e?.message}`);
     }
   }
 
-  console.log(`[IMPORT ASSETS] Import complete: ${ok} successful, ${errors.length} errors`);
   res.json({ success: true, imported: ok, errors: errors.length, errorDetails: errors });
 });
 
-// POST /import/tickets  (Feuille 2)
 router.post('/tickets', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -199,7 +360,9 @@ router.post('/tickets', upload.single('file'), async (req: Request, res: Respons
 
   for (const record of records) {
     try {
-      await glpiApiService.post('/Assistance/Ticket', buildTicketPayload(record));
+      const payload = buildTicketPayload(record);
+      delete payload._item_names; // not a GLPI field
+      await glpiApiService.post('/Assistance/Ticket', payload);
       ok++;
     } catch (e: any) {
       errors.push(`${record.Titre}: ${e?.response?.data?.title || e?.message}`);
@@ -209,7 +372,6 @@ router.post('/tickets', upload.single('file'), async (req: Request, res: Respons
   res.json({ success: true, imported: ok, errors: errors.length, errorDetails: errors });
 });
 
-// POST /import/costs  (Feuille 3)
 router.post('/costs', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -218,121 +380,47 @@ router.post('/costs', upload.single('file'), async (req: Request, res: Response)
   const errors: string[] = [];
 
   for (const record of records) {
-    const ticketId = parseInt(record.Num_Ticket);
-    if (!ticketId) { errors.push(`Invalid Num_Ticket: ${record.Num_Ticket}`); continue; }
+    const csvRef  = record.Num_Ticket?.trim();
+    const glpiId  = parseInt(csvRef); // standalone import: csvRef IS the GLPI id
+    if (!glpiId) { errors.push(`Invalid Num_Ticket: ${csvRef}`); continue; }
 
     try {
-      const costPayload = buildCostPayload(record);
-
-      // 1. Create the cost
-      const costResponse = await glpiApiService.post(
-        `/Assistance/Ticket/${ticketId}/Cost`,
-        costPayload
-      );
-
-      // 2. PATCH the ticket to update the costs[] field
-      await glpiApiService.patch(`/Assistance/Ticket/${ticketId}`, {
-        costs: [{ id: costResponse.id }]
-      });
-
+      const payload = buildCostPayload(record, csvRef);
+      // Cost URI: /Assistance/Ticket/:ticket_glpi_id/Cost  — id in URL, NOT body
+      await glpiApiService.post(`/Assistance/Ticket/${glpiId}/Cost`, payload);
       ok++;
     } catch (e: any) {
-      errors.push(`Ticket ${ticketId}: ${e?.response?.data?.title || e?.message}`);
+      errors.push(`Ticket ${glpiId}: ${e?.response?.data?.title || e?.message}`);
     }
   }
 
   res.json({ success: true, imported: ok, errors: errors.length, errorDetails: errors });
 });
 
-// POST /import/images  (images.zip) - Upload to GLPI Document API
 router.post('/images', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   try {
-    const zip = new AdmZip(req.file.buffer);
-    const entries = zip.getEntries();
-    let uploaded = 0;
-    let linked = 0;
-    const errors: string[] = [];
+    const zip     = new AdmZip(req.file.buffer);
+    let extracted = 0;
 
-    for (const entry of entries) {
-      if (entry.isDirectory) continue;
-      // Only process images/... entries
-      if (!entry.entryName.startsWith('images/')) continue;
+    fs.mkdirSync(IMAGES_DIR, { recursive: true });
 
-      const filename = path.basename(entry.entryName);
-      const imageData = entry.getData();
-
-      try {
-        // Step 1: Upload image to GLPI Document API
-        const formData = new FormData();
-        const mimeType = getMimeType(filename);
-        formData.append('uploadFile', new Blob([imageData], { type: mimeType }), filename);
-        formData.append('filename', filename);
-
-        const docResponse = await glpiApiService.post('/Document', formData);
-        const documentId = docResponse.id;
-
-        if (!documentId) {
-          errors.push(`${filename}: No document ID returned`);
-          continue;
-        }
-
-        uploaded++;
-
-        // Step 2: Try to link to asset based on filename pattern
-        // Expected pattern: assetname.jpg or assetname-id.jpg or id.jpg
-        const assetMatch = filename.match(/^(\d+)|(.+?)-(\d+)/);
-        if (assetMatch) {
-          const assetId = assetMatch[1] || assetMatch[3];
-          const itemType = assetMatch[2] || 'Computer'; // Default to Computer if not specified
-
-          try {
-            await glpiApiService.post('/Document_Item', {
-              input: {
-                documents_id: documentId,
-                itemtype: CSV_TYPE_TO_GLPI[itemType] || itemType,
-                items_id: parseInt(assetId),
-              },
-            });
-            linked++;
-          } catch (linkError) {
-            errors.push(`${filename}: Failed to link to asset ${assetId} (${itemType})`);
-          }
-        }
-      } catch (uploadError: any) {
-        errors.push(`${filename}: ${uploadError?.response?.data?.title || uploadError?.message}`);
-      }
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory || !entry.entryName.startsWith('images/')) continue;
+      const dest = path.join(IMAGES_DIR, path.basename(entry.entryName));
+      fs.writeFileSync(dest, entry.getData());
+      extracted++;
     }
 
-    res.json({ 
-      success: true, 
-      uploaded, 
-      linked, 
-      errors: errors.length, 
-      errorDetails: errors 
-    });
+    res.json({ success: true, extracted, directory: IMAGES_DIR });
   } catch (e: any) {
-    console.error('Import images failed:', e);
-    res.status(500).json({ error: 'Failed to process images', detail: e?.message });
+    res.status(500).json({ error: 'Failed to extract images', detail: e?.message });
   }
 });
 
-// Helper function to get MIME type from filename
-function getMimeType(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.gif': 'image/gif',
-    '.bmp': 'image/bmp',
-    '.webp': 'image/webp',
-  };
-  return mimeTypes[ext] || 'image/jpeg';
-}
+// ── /import/all — Transactional with rollback ──────────────────────────────────
 
-// POST /import/all  (all 4 files at once) - Transactional
 router.post('/all', upload.fields([
   { name: 'assets',  maxCount: 1 },
   { name: 'tickets', maxCount: 1 },
@@ -345,216 +433,213 @@ router.post('/all', upload.fields([
     return res.status(400).json({ error: 'All 4 files are required (assets, tickets, costs, images)' });
   }
 
-  const results: Record<string, any> = {};
-  const createdAssetIds: Array<{ id: number; itemType: string }> = [];
-  const createdTicketIds: number[] = [];
-  const createdCostIds: number[] = [];
-  const ticketRefToIdMap: Record<number, number> = {}; // Map CSV Ref_Ticket to GLPI ticket ID
-  const costToTicketMap: Record<number, number> = {}; // Map cost ID to ticket ID for rollback
+  // Rollback tracking
+  const createdAssets:  Array<{ id: number; itemType: string }> = [];
+  const createdTickets: number[] = [];
+  const createdCosts:   Array<{ ticketId: number; costId: number }> = [];
+  const createdDocIds:  number[] = []; // GLPI Document IDs for rollback
 
-  // Rollback function
+  // Map CSV Ref_Ticket (string) → GLPI ticket ID (number)
+  const csvRefToGlpiId: Record<string, number> = {};
+
   const rollback = async () => {
-    console.log('Rolling back transaction...');
-    
-    // Rollback costs
-    for (const costId of createdCostIds) {
-      try {
-        const ticketId = costToTicketMap[costId];
-        if (ticketId) {
-          // Use nested endpoint for cost deletion
-          await glpiApiService.delete(`/Assistance/Ticket/${ticketId}/Cost/${costId}`);
-        } else {
-          console.error(`No ticket ID found for cost ${costId}, skipping deletion`);
-        }
-      } catch (err) {
-        console.error(`Failed to delete cost ${costId}:`, err);
-      }
+    console.log('[ROLLBACK] Starting...');
+    for (const { ticketId, costId } of createdCosts) {
+      try { await glpiApiService.delete(`/Assistance/Ticket/${ticketId}/Cost/${costId}`, true); } catch {}
     }
-
-    // Rollback tickets
-    for (const ticketId of createdTicketIds) {
-      try {
-        await glpiApiService.delete(`/Assistance/Ticket/${ticketId}`);
-      } catch (err) {
-        console.error(`Failed to delete ticket ${ticketId}:`, err);
-      }
+    for (const id of createdTickets) {
+      try { await glpiApiService.delete(`/Assistance/Ticket/${id}`, true); } catch {}
     }
-
-    // Rollback assets
-    for (const { id, itemType } of createdAssetIds) {
-      try {
-        await glpiApiService.delete(`/Assets/${itemType}/${id}`);
-      } catch (err) {
-        console.error(`Failed to delete asset ${id} (${itemType}):`, err);
-      }
+    for (const { id, itemType } of createdAssets) {
+      try { await glpiApiService.delete(`/Assets/${itemType}/${id}`, true); } catch {}
     }
+    for (const docId of createdDocIds) {
+      try { await glpiApiService.delete(`/Management/Document/${docId}`, true); } catch {}
+    }
+    console.log('[ROLLBACK] Done.');
   };
 
   try {
-    console.log('[IMPORT ALL] Starting transactional import...');
-    
-    // Assets
+    // Reset per-run cache
+    Object.keys(cache).forEach(k => { cache[k] = {}; });
+
+    // ── 1. Assets ──────────────────────────────────────────────────────────
     console.log('[IMPORT ALL] Processing assets...');
     const assetRecords = await parseCSV(files.assets[0].buffer);
     console.log(`[IMPORT ALL] Parsed ${assetRecords.length} asset records`);
-    
+
     for (const record of assetRecords) {
       const itemType: AssetItemType = CSV_TYPE_TO_GLPI[record.Item_Type || ''] || 'Computer';
       console.log(`[IMPORT ALL] Processing asset: ${record.Name} (Type: ${record.Item_Type} -> ${itemType})`);
       console.log(`[IMPORT ALL] Asset record data:`, record);
-      
-      try {
-        const payload = buildAssetPayload(record);
-        console.log(`[IMPORT ALL] Asset payload for ${record.Name}:`, payload);
-        
-        const response = await glpiApiService.post(`/Assets/${itemType}`, payload);
-        createdAssetIds.push({ id: response.id, itemType });
-        console.log(`[IMPORT ALL] Successfully created asset ${record.Name} with GLPI ID: ${response.id}`);
-      } catch (err) {
-        console.error(`[IMPORT ALL] Failed to create asset ${record.Name}:`, err);
-        throw new Error(`Failed to create asset ${record.Name}`);
-      }
-    }
-    results.assets = createdAssetIds.length;
-    console.log(`[IMPORT ALL] Assets import complete: ${createdAssetIds.length} created`);
 
-    // Tickets
+      const payload = await buildAssetPayload(record, itemType);
+      console.log(`[IMPORT ALL] Asset payload for ${record.Name}:`, payload);
+
+      const response = await glpiApiService.post(`/Assets/${itemType}`, payload);
+      createdAssets.push({ id: response.id, itemType });
+      console.log(`[IMPORT ALL] Successfully created asset ${record.Name} with GLPI ID: ${response.id}`);
+    }
+    console.log(`[IMPORT ALL] Assets import complete: ${createdAssets.length} created`);
+
+    // ── 2. Tickets ─────────────────────────────────────────────────────────
     console.log('[IMPORT ALL] Processing tickets...');
     const ticketRecords = await parseCSV(files.tickets[0].buffer);
     console.log(`[IMPORT ALL] Parsed ${ticketRecords.length} ticket records`);
-    
-    for (const record of ticketRecords) {
-      console.log(`[IMPORT ALL] Processing ticket: ${record.Titre} (Ref: ${record.Ref_Ticket})`);
-      console.log(`[IMPORT ALL] Ticket record data:`, record);
-      
-      try {
-        const payload = buildTicketPayload(record);
-        console.log(`[IMPORT ALL] Ticket payload for ${record.Titre}:`, payload);
-        
-        const response = await glpiApiService.post('/Assistance/Ticket', payload);
-        createdTicketIds.push(response.id);
-        console.log(`[IMPORT ALL] Successfully created ticket ${record.Titre} with GLPI ID: ${response.id}`);
-        
-        // Store mapping from CSV Ref_Ticket to GLPI ticket ID
-        if (record.Ref_Ticket) {
-          ticketRefToIdMap[parseInt(record.Ref_Ticket)] = response.id;
-          console.log(`[IMPORT ALL] Mapped CSV Ref ${record.Ref_Ticket} -> GLPI ID ${response.id}`);
-        }
-      } catch (err) {
-        console.error(`[IMPORT ALL] Failed to create ticket ${record.Titre}:`, err);
-        throw new Error(`Failed to create ticket ${record.Titre}`);
-      }
-    }
-    results.tickets = createdTicketIds.length;
-    console.log(`[IMPORT ALL] Tickets import complete: ${createdTicketIds.length} created`);
-    console.log(`[IMPORT ALL] Reference mapping:`, ticketRefToIdMap);
 
-    // Costs
+    for (const record of ticketRecords) {
+      const csvRef = String(record.Ref_Ticket || '').trim();
+      console.log(`[IMPORT ALL] Processing ticket: ${record.Titre} (Ref: ${csvRef})`);
+      console.log(`[IMPORT ALL] Ticket record data:`, record);
+
+      const payload = buildTicketPayload(record);
+      const itemNames: string[] = payload._item_names || [];
+      delete payload._item_names; // not a GLPI API field
+
+      console.log(`[IMPORT ALL] Ticket payload for ${record.Titre}:`, payload);
+
+      const response = await glpiApiService.post('/Assistance/Ticket', payload);
+      const glpiTicketId: number = response.id;
+      createdTickets.push(glpiTicketId);
+
+      // Build CSV Ref → GLPI ID mapping for cost phase
+      if (csvRef) {
+        csvRefToGlpiId[csvRef] = glpiTicketId;
+        console.log(`[IMPORT ALL] Mapped CSV Ref ${csvRef} -> GLPI ID ${glpiTicketId}`);
+      }
+
+      console.log(`[IMPORT ALL] Successfully created ticket ${record.Titre} with GLPI ID: ${glpiTicketId}`);
+    }
+    console.log(`[IMPORT ALL] Tickets import complete: ${createdTickets.length} created`);
+    console.log(`[IMPORT ALL] Reference mapping:`, csvRefToGlpiId);
+
+    // ── 3. Costs ───────────────────────────────────────────────────────────
     console.log('[IMPORT ALL] Processing costs...');
     const costRecords = await parseCSV(files.costs[0].buffer);
     console.log(`[IMPORT ALL] Parsed ${costRecords.length} cost records`);
-    
-    for (const record of costRecords) {
-      const ticketRef = parseInt(record.Num_Ticket);
-      if (!ticketRef) continue;
-      
-      console.log(`[IMPORT ALL] Processing cost for ticket Ref: ${ticketRef}`);
-      console.log(`[IMPORT ALL] Cost record data:`, record);
-      
-      // Use mapping to find the actual GLPI ticket ID
-      const ticketId = ticketRefToIdMap[ticketRef];
-      if (!ticketId) {
-        console.error(`[IMPORT ALL] Ticket with Ref_Ticket ${ticketRef} not found in mapping`);
-        throw new Error(`Ticket with Ref_Ticket ${ticketRef} not found`);
-      }
-      
-      console.log(`[IMPORT ALL] Mapped ticket Ref ${ticketRef} -> GLPI ID ${ticketId}`);
-      
-      try {
-        const costPayload = buildCostPayload(record);
-        console.log(`[IMPORT ALL] Cost payload:`, costPayload);
-        
-        const costResp = await glpiApiService.post(`/Assistance/Ticket/${ticketId}/Cost`, costPayload);
-        createdCostIds.push(costResp.id);
-        costToTicketMap[costResp.id] = ticketId; // Store mapping for rollback
-        console.log(`[IMPORT ALL] Successfully created cost with GLPI ID: ${costResp.id}`);
-      } catch (err) {
-        console.error(`[IMPORT ALL] Failed to create cost for ticket ${ticketId}:`, err);
-        throw new Error(`Failed to create cost for ticket ${ticketId}`);
-      }
-    }
-    results.costs = createdCostIds.length;
-    console.log(`[IMPORT ALL] Costs import complete: ${createdCostIds.length} created`);
 
-    // Images - Save locally to backend and upload to GLPI
+    for (const record of costRecords) {
+      const csvRef    = String(record.Num_Ticket || '').trim();
+      const glpiTicketId = csvRefToGlpiId[csvRef];
+
+      console.log(`[IMPORT ALL] Processing cost for ticket Ref: ${csvRef}`);
+      console.log(`[IMPORT ALL] Cost record data:`, record);
+
+      if (!glpiTicketId) {
+        throw new Error(`Cost references CSV Ref_Ticket "${csvRef}" but no matching ticket was created`);
+      }
+
+      console.log(`[IMPORT ALL] Mapped ticket Ref ${csvRef} -> GLPI ID ${glpiTicketId}`);
+
+      // Build payload WITHOUT ticket field — the ticket id goes in the URL only
+      const costPayload = buildCostPayload(record, csvRef);
+      console.log(`[IMPORT ALL] Cost payload:`, costPayload);
+
+      // POST /Assistance/Ticket/:glpiTicketId/Cost
+      const costResp = await glpiApiService.post(`/Assistance/Ticket/${glpiTicketId}/Cost`, costPayload);
+      createdCosts.push({ ticketId: glpiTicketId, costId: costResp.id });
+      console.log(`[IMPORT ALL] Successfully created cost with GLPI ID: ${costResp.id}`);
+    }
+    console.log(`[IMPORT ALL] Costs import complete: ${createdCosts.length} created`);
+
+    // ── 4. Images — upload to GLPI Document API + link to matching assets ──
     console.log('[IMPORT ALL] Processing images...');
     const zip = new AdmZip(files.images[0].buffer);
     const entries = zip.getEntries();
     console.log(`[IMPORT ALL] Found ${entries.length} entries in zip file`);
 
+    fs.mkdirSync(IMAGES_DIR, { recursive: true });
+    let savedImages  = 0;
+    let uploadedDocs = 0;
+    const createdDocIds: number[] = [];
+
+    // Build name→{id,itemType} map from assets created in this run
+    const assetNameMap: Record<string, { id: number; itemType: string }> = {};
+    assetRecords.forEach((rec: any, idx: number) => {
+      const asset = createdAssets[idx];
+      if (asset) assetNameMap[rec.Name?.trim().toLowerCase()] = asset;
+    });
+
     for (const entry of entries) {
-      if (entry.isDirectory) continue;
-      if (!entry.entryName.startsWith('images/')) continue;
+      if (entry.isDirectory || !entry.entryName.startsWith('images/')) continue;
 
-      const filename = path.basename(entry.entryName);
+      const filename  = path.basename(entry.entryName);
       const imageData = entry.getData();
-      const mimeType = getMimeType(filename);
+      const mimeType  = getMimeType(filename);
 
+      // 4a. Save locally (for frontend serving)
+      const localPath = path.join(IMAGES_DIR, filename);
+      fs.writeFileSync(localPath, imageData);
+      console.log(`[IMPORT ALL] Saved image: ${filename}`);
+      savedImages++;
+
+      // 4b. Upload to GLPI /Management/Document via multipart/form-data
       try {
-        // Save image to local storage
-        const imagePath = path.join(IMAGES_DIR, filename);
-        fs.writeFileSync(imagePath, imageData);
-        console.log(`[IMPORT ALL] Saved image locally: ${filename}`);
-
-        // Upload to GLPI Document API
         const formData = new FormData();
+        // GLPI expects the file under "uploadFile" and metadata as JSON in "input"
+        formData.append(
+          'uploadFile',
+          new Blob([imageData], { type: mimeType }),
+          filename
+        );
         formData.append('input', JSON.stringify({
-          name: filename,
-          _filename: [filename]
+          name:     path.parse(filename).name,
+          filename: filename,
+          mime:     mimeType,
+          entity:   { id: 0 },
         }));
-        formData.append('filename[0]', new Blob([imageData], { type: mimeType }), filename);
 
-        const docResponse = await glpiApiService.post('/Management/Document', formData);
-        console.log(`[IMPORT ALL] Uploaded image to GLPI Document API: ${filename} (ID: ${docResponse.id})`);
+        const docResp = await glpiApiService.postMultipart('/Management/Document', formData);
+        const docId: number = docResp.id;
+        createdDocIds.push(docId);
+        uploadedDocs++;
+        console.log(`[IMPORT ALL] Uploaded document "${filename}" → GLPI Document ID: ${docId}`);
 
-        // Try to link to asset based on filename pattern
-        const assetMatch = filename.match(/^(\d+)|(.+?)-(\d+)/);
-        if (assetMatch) {
-          const assetId = assetMatch[1] || assetMatch[3];
-          const itemType = assetMatch[2] || 'Computer';
-          const glpiType = CSV_TYPE_TO_GLPI[itemType] || itemType;
+        // 4c. Link document to matching asset (filename without extension = asset Name)
+        const baseName = path.parse(filename).name.toLowerCase();
+        const matchedAsset = assetNameMap[baseName];
 
+        if (matchedAsset) {
           try {
-            // Use nested endpoint for document linking
-            const endpoint = `/Assets/${glpiType}/${assetId}/Document`;
-            await glpiApiService.post(endpoint, {
-              input: { documents_id: docResponse.id }
-            });
-            console.log(`[IMPORT ALL] Linked document ${docResponse.id} to asset ${assetId} (${glpiType})`);
-          } catch (linkErr) {
-            console.error(`[IMPORT ALL] Failed to link document ${docResponse.id} to asset ${assetId}:`, linkErr);
-            // Don't fail the transaction if linking fails, just log it
+            // POST /Assets/{itemType}/{id}/Document  — nested document link
+            await glpiApiService.post(
+              `/Assets/${matchedAsset.itemType}/${matchedAsset.id}/Document`,
+              { document: { id: docId } }
+            );
+            console.log(`[IMPORT ALL] Linked Document ${docId} → ${matchedAsset.itemType} #${matchedAsset.id}`);
+          } catch (linkErr: any) {
+            console.warn(`[IMPORT ALL] Could not link document to asset "${baseName}": ${linkErr?.response?.data?.title || linkErr?.message}`);
+            // Non-fatal: don't rollback for a failed link
           }
+        } else {
+          console.log(`[IMPORT ALL] No asset matched for "${filename}" — document uploaded without link`);
         }
-      } catch (saveErr) {
-        console.error(`[IMPORT ALL] Failed to process image ${filename}:`, saveErr);
-        throw new Error(`Failed to process image ${filename}`);
+      } catch (uploadErr: any) {
+        console.error(`[IMPORT ALL] Failed to upload image "${filename}" to GLPI: ${uploadErr?.response?.data?.title || uploadErr?.message}`);
+        // Non-fatal: image saved locally, GLPI upload failed → rollback doc if needed
+        // Don't throw here; images are optional for the transaction
       }
     }
-    results.images = entries.filter(e => !e.isDirectory && e.entryName.startsWith('images/')).length;
-    console.log(`[IMPORT ALL] Images import complete: ${results.images} saved`);
+    console.log(`[IMPORT ALL] Images complete: ${savedImages} saved locally, ${uploadedDocs} uploaded to GLPI`);
+
+    const results = {
+      assets:    createdAssets.length,
+      tickets:   createdTickets.length,
+      costs:     createdCosts.length,
+      images:    savedImages,
+      documents: uploadedDocs,
+      ticketRefMap: csvRefToGlpiId,
+    };
 
     console.log('[IMPORT ALL] Transaction complete successfully:', results);
     res.json({ success: true, results });
+
   } catch (error: any) {
-    console.error('Transaction failed, rolling back:', error);
-    
-    // Rollback all changes
+    console.error('[IMPORT ALL] Transaction failed, rolling back:', error.message);
     await rollback();
-    
-    res.status(500).json({ 
-      error: 'Import failed - all changes rolled back', 
-      detail: error.message 
+    res.status(500).json({
+      error:  'Import failed — all changes rolled back',
+      detail: error.message,
     });
   }
 });

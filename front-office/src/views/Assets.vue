@@ -152,12 +152,12 @@ const loadAssetImages = async () => {
     assetImages.value[asset.id] = [];
     for (const filename of possibleFilenames) {
       try {
-        const response = await fetch(`http://localhost:3001/images/${filename}`, { method: 'HEAD' });
+        const response = await fetch(`http://localhost:3001/public/images/${filename}`, { method: 'HEAD' });
         if (response.ok) {
           assetImages.value[asset.id].push({
             id: filename,
             filename: filename,
-            download_url: `http://localhost:3001/images/${filename}`
+            download_url: `http://localhost:3001/public/images/${filename}`
           });
           // Only keep the first matching image for the table view
           break;

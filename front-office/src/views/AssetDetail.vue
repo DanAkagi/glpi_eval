@@ -35,19 +35,19 @@
         <div class="info-grid">
           <div class="info-item">
             <label>ID:</label>
-            <span>{{ asset.id }}</span>
+            <span>{{ asset.id || 'N/A' }}</span>
           </div>
           <div class="info-item">
             <label>Name:</label>
-            <span><strong>{{ asset.name }}</strong></span>
+            <span><strong>{{ asset.name || 'N/A' }}</strong></span>
           </div>
           <div class="info-item">
             <label>Type:</label>
-            <span>{{ asset.item_type }}</span>
+            <span>{{ asset.item_type || 'N/A' }}</span>
           </div>
           <div class="info-item">
             <label>Status:</label>
-            <span>{{ asset.status }}</span>
+            <span>{{ asset.status || 'N/A' }}</span>
           </div>
           <div class="info-item">
             <label>Location:</label>
@@ -138,12 +138,12 @@ const loadImages = async () => {
     images.value = [];
     for (const filename of possibleFilenames) {
       try {
-        const response = await fetch(`http://localhost:3001/images/${filename}`, { method: 'HEAD' });
+        const response = await fetch(`http://localhost:3001/public/images/${filename}`, { method: 'HEAD' });
         if (response.ok) {
           images.value.push({
             id: filename,
             filename: filename,
-            download_url: `http://localhost:3001/images/${filename}`
+            download_url: `http://localhost:3001/public/images/${filename}`
           });
         }
       } catch (error) {

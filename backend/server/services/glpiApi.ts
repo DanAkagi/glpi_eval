@@ -69,7 +69,8 @@ class GLPIApiService {
 
     const response = await axios.post(
       `${this.baseUrl}/token?${params.toString()}`,
-      {}
+      {},
+      { headers: { 'User-Agent': 'Mozilla/5.0' } }
     );
 
     this.accessToken = response.data.access_token;
@@ -85,7 +86,8 @@ class GLPIApiService {
 
   private authHeaders() {
     return {
-      Authorization: `Bearer ${this.accessToken}`
+      Authorization: `Bearer ${this.accessToken}`,
+      'User-Agent': 'Mozilla/5.0'
     };
   }
 
@@ -100,12 +102,8 @@ class GLPIApiService {
 
   async post(endpoint: string, data: any): Promise<any> {
     await this.ensureAuthenticated();
-    const headers: Record<string, string> = { ...this.authHeaders() };
-    if (!(data instanceof FormData)) {
-      headers['Content-Type'] = 'application/json';
-    }
     const response = await axios.post(`${this.baseUrl}${endpoint}`, data, {
-      headers
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' }
     });
     return response.data;
   }
@@ -114,6 +112,18 @@ class GLPIApiService {
     await this.ensureAuthenticated();
     const response = await axios.patch(`${this.baseUrl}${endpoint}`, data, {
       headers: { ...this.authHeaders(), 'Content-Type': 'application/json' }
+    });
+    return response.data;
+  }
+
+  // Upload multipart/form-data (for GLPI Document API)
+  async postMultipart(endpoint: string, formData: FormData): Promise<any> {
+    await this.ensureAuthenticated();
+    const response = await axios.post(`${this.baseUrl}${endpoint}`, formData, {
+      headers: {
+        ...this.authHeaders(),
+        // Do NOT set Content-Type manually — axios sets it with boundary automatically
+      }
     });
     return response.data;
   }
