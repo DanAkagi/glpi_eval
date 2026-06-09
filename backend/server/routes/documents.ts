@@ -1,107 +1,120 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import { glpiApiService } from '../services/glpiApi';
+import path from 'path';
+import fs from 'fs';
+import { glpiApiService } from '../services/glpiApi.js';
 
 const router = Router();
+const IMAGES_DIR = path.resolve(process.cwd(), 'public', 'images');
 
-// Configure multer for file uploads
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-  },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// POST /documents - Upload a document (image)
+function getMimeType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  return ({
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+    '.gif': 'image/gif',  '.bmp': 'image/bmp',  '.webp': 'image/webp',
+    '.pdf': 'application/pdf',
+  })[ext] || 'application/octet-stream';
+}
+
+// POST /api/documents
+// Upload a file: save locally + create GLPI Document record with link URL.
+// NOTE: /Management/Document only accepts application/json (no multipart).
+// The file is served by Express static, its URL stored in Document.link.
 router.post('/', upload.single('file'), async (req: Request, res: Response) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+    fs.mkdirSync(IMAGES_DIR, { recursive: true });
+    const filename = req.file.originalname;
+    const localPath = path.join(IMAGES_DIR, filename);
+    fs.writeFileSync(localPath, req.file.buffer);
 
-    const formData = new FormData();
-    formData.append('uploadFile', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname);
-    formData.append('filename', req.file.originalname);
+    const PUBLIC_BASE = process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3001}`;
+    const publicUrl   = `${PUBLIC_BASE}/images/${encodeURIComponent(filename)}`;
 
-    const response = await glpiApiService.post('/Management/Document', formData);
-    res.json(response);
-  } catch (error) {
-    console.error('Failed to upload document:', error);
+    const response = await glpiApiService.post('/Management/Document', {
+      name:     path.parse(filename).name,
+      filename: filename,
+      mime:     getMimeType(filename),
+      link:     publicUrl,
+      entity:   { id: 0 },
+    });
+
+    res.json({ ...response, local_url: publicUrl });
+  } catch (error: any) {
+    console.error('Failed to upload document:', error?.response?.data || error?.message);
     res.status(500).json({ error: 'Failed to upload document' });
   }
 });
 
-// POST /documents/link - Link a document to an asset
+// POST /api/documents/link
+// Link an existing GLPI Document to an asset via Legacy API (Document_Item).
+// Body: { documents_id, itemtype, items_id }
 router.post('/link', async (req: Request, res: Response) => {
+  const { documents_id, itemtype, items_id } = req.body;
+
+  if (!documents_id || !itemtype || !items_id) {
+    return res.status(400).json({ error: 'Missing required fields: documents_id, itemtype, items_id' });
+  }
+
   try {
-    const { documents_id, itemtype, items_id } = req.body;
-
-    if (!documents_id || !itemtype || !items_id) {
-      return res.status(400).json({ error: 'Missing required fields: documents_id, itemtype, items_id' });
-    }
-
-    const payload = {
-      input: {
-        documents_id,
-        itemtype,
-        items_id,
-      },
-    };
-
-    const response = await glpiApiService.post('/Document_Item', payload);
+    // Use Legacy API: High-Level API has no Document_Item endpoint
+    const response = await glpiApiService.postLegacy('/Document_Item', {
+      input: { documents_id, itemtype, items_id }
+    });
     res.json(response);
-  } catch (error) {
-    console.error('Failed to link document to asset:', error);
+  } catch (error: any) {
+    console.error('Failed to link document:', error?.response?.data || error?.message);
     res.status(500).json({ error: 'Failed to link document to asset' });
   }
 });
 
-// GET /documents/asset/:itemtype/:items_id - Get documents for a specific asset
+// GET /api/documents/asset/:itemtype/:items_id
+// List documents linked to an asset via GLPI Document list filtered by asset.
 router.get('/asset/:itemtype/:items_id', async (req: Request, res: Response) => {
+  const { itemtype, items_id } = req.params;
+
   try {
-    const { itemtype, items_id } = req.params;
-    
-    // Get Document_Item entries for this asset
-    const response = await glpiApiService.get('/Document_Item', {
-      itemtype,
-      items_id,
+    // GET /Management/Document returns documents; filter by linked item is done
+    // via the legacy endpoint or by fetching Document_Item records.
+    const docItems = await glpiApiService.getLegacy('/Document_Item', {
+      'searchText[itemtype]': itemtype,
+      'searchText[items_id]': items_id,
     });
 
-    // GLPI API returns data in different formats - handle both array and object
-    const documentItems = Array.isArray(response) ? response : (response?.data || []);
-    
-    // Extract document IDs and fetch document details
-    const documentIds = documentItems.map((item: any) => item.documents_id).filter(Boolean);
-    const documents = [];
-
-    for (const docId of documentIds) {
+    const docs: any[] = [];
+    for (const item of (docItems || [])) {
       try {
-        const docDetails = await glpiApiService.get(`/Document/${docId}`);
-        documents.push({
-          id: docDetails.id,
-          filename: docDetails.filename,
-          mime: docDetails.mime,
-          download_url: `/api/documents/${docId}/download`,
+        const d = await glpiApiService.get(`/Management/Document/${item.documents_id}`);
+        docs.push({
+          id:           d.id,
+          name:         d.name,
+          filename:     d.filename,
+          mime:         d.mime,
+          link:         d.link,
+          download_url: d.download_url,
         });
-      } catch (err) {
-        console.error(`Failed to fetch document ${docId}:`, err);
-      }
+      } catch { /* skip inaccessible */ }
     }
 
-    res.json(documents);
-  } catch (error) {
-    console.error('Failed to get documents for asset:', error);
+    res.json(docs);
+  } catch (error: any) {
+    console.error('Failed to get documents for asset:', error?.response?.data || error?.message);
     res.status(500).json({ error: 'Failed to get documents for asset' });
   }
 });
 
-// GET /documents/:id - Get document by ID
+// GET /api/documents/:id
 router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const response = await glpiApiService.get(`/Document/${req.params.id}`);
+    const response = await glpiApiService.get(`/Management/Document/${req.params.id}`);
     res.json(response);
   } catch (error) {
-    console.error('Failed to get document:', error);
     res.status(500).json({ error: 'Failed to get document' });
   }
 });

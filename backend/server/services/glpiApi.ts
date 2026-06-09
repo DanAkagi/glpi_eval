@@ -154,3 +154,4 @@ class GLPIApiService {
 }
 
 export const glpiApiService = new GLPIApiService();
+

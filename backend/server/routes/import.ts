@@ -197,21 +197,33 @@ async function resolveUserId(name: string): Promise<number | undefined> {
 
 // ── Value Mappers ──────────────────────────────────────────────────────────────
 
-// CSV Status → GLPI states_id (numeric)
-// These IDs match the default GLPI state records created on install.
-function mapStatesId(status: string): number | undefined {
-  const map: Record<string, number> = {
-    'En production':  1,
-    'En stock':       2,
-    'En réparation':  3,
-    'En panne':       3, // map to "En réparation" by default
-    'Hors service':   4,
-    'Volé':           5,
-    'Perdu':          6,
-    'Maintenance':    3,
-  };
-  return map[status?.trim()];
+// ── State ID resolution (cache) ───────────────────────────────────────────────
+// GLPI State IDs are NOT fixed — they vary per installation.
+// We resolve them dynamically via GET /Dropdowns/State?filter=name==X
+
+async function resolveStateId(statusName: string): Promise<number | undefined> {
+  if (!statusName?.trim()) return undefined;
+  return resolveId('state', '/Dropdowns/State', statusName);
 }
+
+// CSV Status label aliases → canonical GLPI State names (as created on install)
+const STATUS_ALIASES: Record<string, string> = {
+  'En production':  'En production',
+  'In production':  'En production',
+  'En stock':       'En stock',
+  'In stock':       'En stock',
+  'En réparation':  'En réparation',
+  'Under repair':   'En réparation',
+  'En panne':       'En réparation',
+  'Broken':         'En réparation',
+  'Maintenance':    'En réparation',
+  'Hors service':   'Hors service',
+  'Out of service': 'Hors service',
+  'Volé':           'Volé',
+  'Stolen':         'Volé',
+  'Perdu':          'Perdu',
+  'Lost':           'Perdu',
+};
 
 function mapPriority(priority: string): number {
   const map: Record<string, number> = {
@@ -233,6 +245,7 @@ function mapTicketStatus(status: string): number {
     'Assigned': 2, 'Attribué': 2,
     'Planned': 3, 'Planifié': 3,
     'Waiting': 4, 'En attente': 4,
+    'Pending': 4,  // Map Pending to Waiting (status 4)
     'Solved': 5, 'Résolu': 5,
     'Closed': 6, 'Clos': 6,
   };
@@ -259,9 +272,11 @@ async function buildAssetPayload(record: any, itemType: AssetItemType): Promise<
     otherserial: record.Inventory_Number?.trim() || '',
   };
 
-  // status — object {id} matching the State schema field name
-  const statesId = mapStatesId(record.Status);
-  if (statesId !== undefined) payload.status = { id: statesId };
+  // status — resolve dynamic State ID via /Dropdowns/State, NOT a hardcoded integer
+  // GLPI State IDs vary per installation; we must resolve by name.
+  const canonicalStatus = STATUS_ALIASES[record.Status?.trim()] || record.Status?.trim();
+  const stateId = canonicalStatus ? await resolveStateId(canonicalStatus) : undefined;
+  if (stateId !== undefined) payload.status = { id: stateId };
 
   // Relational fields — High-Level API uses nested objects {id}, NOT _id integer fields
   const locationId = await resolveId('location', '/Dropdowns/Location', record.Location);
@@ -482,10 +497,17 @@ router.post('/all', upload.fields([
     }
     console.log(`[IMPORT ALL] Assets import complete: ${createdAssets.length} created`);
 
-    // ── 2. Tickets ─────────────────────────────────────────────────────────
+    // ── 2. Tickets + asset linking via Legacy API ──────────────────────────
     console.log('[IMPORT ALL] Processing tickets...');
     const ticketRecords = await parseCSV(files.tickets[0].buffer);
     console.log(`[IMPORT ALL] Parsed ${ticketRecords.length} ticket records`);
+
+    // Build asset name → {id, itemType} map for linking
+    const assetByName: Record<string, { id: number; itemType: string }> = {};
+    assetRecords.forEach((rec: any, idx: number) => {
+      const a = createdAssets[idx];
+      if (a) assetByName[rec.Name?.trim().toLowerCase()] = a;
+    });
 
     for (const record of ticketRecords) {
       const csvRef = String(record.Ref_Ticket || '').trim();
@@ -502,10 +524,33 @@ router.post('/all', upload.fields([
       const glpiTicketId: number = response.id;
       createdTickets.push(glpiTicketId);
 
-      // Build CSV Ref → GLPI ID mapping for cost phase
       if (csvRef) {
         csvRefToGlpiId[csvRef] = glpiTicketId;
         console.log(`[IMPORT ALL] Mapped CSV Ref ${csvRef} -> GLPI ID ${glpiTicketId}`);
+      }
+
+      // Link assets to ticket via Legacy API (POST /apirest.php/Item_Ticket)
+      // The High-Level API v2.3 has no direct endpoint for this relationship.
+      if (itemNames.length > 0) {
+        for (const assetName of itemNames) {
+          const matched = assetByName[assetName.trim().toLowerCase()];
+          if (matched) {
+            try {
+              await glpiApiService.postLegacy('/Item_Ticket', {
+                input: {
+                  tickets_id: glpiTicketId,
+                  itemtype:   matched.itemType,
+                  items_id:   matched.id,
+                }
+              });
+              console.log(`[IMPORT ALL] Linked asset "${assetName}" (${matched.itemType}#${matched.id}) → Ticket ${glpiTicketId}`);
+            } catch (linkErr: any) {
+              console.warn(`[IMPORT ALL] Could not link asset "${assetName}" to ticket ${glpiTicketId}: ${linkErr?.response?.data?.message || linkErr?.message}`);
+            }
+          } else {
+            console.warn(`[IMPORT ALL] Asset "${assetName}" not found in import batch — skipping link`);
+          }
+        }
       }
 
       console.log(`[IMPORT ALL] Successfully created ticket ${record.Titre} with GLPI ID: ${glpiTicketId}`);
@@ -542,7 +587,10 @@ router.post('/all', upload.fields([
     }
     console.log(`[IMPORT ALL] Costs import complete: ${createdCosts.length} created`);
 
-    // ── 4. Images — upload to GLPI Document API + link to matching assets ──
+    // ── 4. Images — save locally + create GLPI Document record with link URL ──
+    // NOTE: /Management/Document only accepts application/json (no multipart).
+    // Binary upload requires the Legacy API (/apirest.php/Document).
+    // Strategy: save locally → serve via Express static → store public URL in Document.link.
     console.log('[IMPORT ALL] Processing images...');
     const zip = new AdmZip(files.images[0].buffer);
     const entries = zip.getEntries();
@@ -551,7 +599,6 @@ router.post('/all', upload.fields([
     fs.mkdirSync(IMAGES_DIR, { recursive: true });
     let savedImages  = 0;
     let uploadedDocs = 0;
-    const createdDocIds: number[] = [];
 
     // Build name→{id,itemType} map from assets created in this run
     const assetNameMap: Record<string, { id: number; itemType: string }> = {};
@@ -560,73 +607,65 @@ router.post('/all', upload.fields([
       if (asset) {
         const key = rec.Name?.trim().toLowerCase();
         assetNameMap[key] = asset;
-        console.log(`[IMPORT ALL] Mapped asset "${rec.Name}" (key: "${key}") → ID ${asset.id}, Type ${asset.itemType}`);
       }
     });
-    console.log(`[IMPORT ALL] Asset name map keys:`, Object.keys(assetNameMap));
+
+    const PUBLIC_BASE = process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3001}`;
 
     for (const entry of entries) {
       if (entry.isDirectory || !entry.entryName.startsWith('images/')) continue;
 
       const filename  = path.basename(entry.entryName);
       const imageData = entry.getData();
-      const mimeType  = getMimeType(filename);
 
-      // 4a. Save locally (for frontend serving)
+      // 4a. Save locally (served as static files by Express)
       const localPath = path.join(IMAGES_DIR, filename);
       fs.writeFileSync(localPath, imageData);
       console.log(`[IMPORT ALL] Saved image: ${filename}`);
       savedImages++;
 
-      // 4b. Upload to GLPI /Management/Document via multipart/form-data
+      // 4b. Create GLPI Document record with public URL in `link` field
+      // This is the correct JSON approach since multipart is not supported by the High-Level API.
       try {
-        const formData = new FormData();
-        // GLPI expects the file under "uploadFile" and metadata as JSON in "input"
-        formData.append(
-          'uploadFile',
-          new Blob([imageData], { type: mimeType }),
-          filename
-        );
-        formData.append('input', JSON.stringify({
+        const publicUrl = `${PUBLIC_BASE}/images/${encodeURIComponent(filename)}`;
+        const docResp = await glpiApiService.post('/Management/Document', {
           name:     path.parse(filename).name,
           filename: filename,
-          mime:     mimeType,
+          mime:     getMimeType(filename),
+          link:     publicUrl,
           entity:   { id: 0 },
-        }));
-
-        const docResp = await glpiApiService.postMultipart('/Management/Document', formData);
+        });
         const docId: number = docResp.id;
         createdDocIds.push(docId);
         uploadedDocs++;
-        console.log(`[IMPORT ALL] Uploaded document "${filename}" → GLPI Document ID: ${docId}`);
+        console.log(`[IMPORT ALL] Created Document "${filename}" (link: ${publicUrl}) → GLPI ID: ${docId}`);
 
-        // 4c. Link document to matching asset (filename without extension = asset Name)
+        // 4c. Link document to matching asset via Legacy API (POST /apirest.php/Document_Item)
+        // The High-Level API has no nested /Assets/{type}/{id}/Document endpoint.
         const baseName = path.parse(filename).name.toLowerCase();
-        console.log(`[IMPORT ALL] Looking for asset with key "${baseName}" from filename "${filename}"`);
         const matchedAsset = assetNameMap[baseName];
 
         if (matchedAsset) {
           try {
-            // POST /Assets/{itemType}/{id}/Document  — nested document link
-            await glpiApiService.post(
-              `/Assets/${matchedAsset.itemType}/${matchedAsset.id}/Document`,
-              { document: { id: docId } }
-            );
+            await glpiApiService.postLegacy('/Document_Item', {
+              input: {
+                documents_id: docId,
+                itemtype:     matchedAsset.itemType,
+                items_id:     matchedAsset.id,
+              }
+            });
             console.log(`[IMPORT ALL] Linked Document ${docId} → ${matchedAsset.itemType} #${matchedAsset.id}`);
           } catch (linkErr: any) {
-            console.warn(`[IMPORT ALL] Could not link document to asset "${baseName}": ${linkErr?.response?.data?.title || linkErr?.message}`);
-            // Non-fatal: don't rollback for a failed link
+            console.warn(`[IMPORT ALL] Could not link document to asset "${baseName}": ${linkErr?.response?.data?.message || linkErr?.message}`);
           }
         } else {
-          console.log(`[IMPORT ALL] No asset matched for "${filename}" — document uploaded without link`);
+          console.log(`[IMPORT ALL] No asset matched for "${filename}" — document created without asset link`);
         }
       } catch (uploadErr: any) {
-        console.error(`[IMPORT ALL] Failed to upload image "${filename}" to GLPI: ${uploadErr?.response?.data?.title || uploadErr?.message}`);
-        // Non-fatal: image saved locally, GLPI upload failed → rollback doc if needed
-        // Don't throw here; images are optional for the transaction
+        console.error(`[IMPORT ALL] Failed to create Document for "${filename}": ${uploadErr?.response?.data?.title || uploadErr?.message}`);
       }
     }
-    console.log(`[IMPORT ALL] Images complete: ${savedImages} saved locally, ${uploadedDocs} uploaded to GLPI`);
+    console.log(`[IMPORT ALL] Images complete: ${savedImages} saved locally, ${uploadedDocs} GLPI Documents created`);
 
     const results = {
       assets:    createdAssets.length,

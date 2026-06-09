@@ -64,7 +64,7 @@ function typeToInt(t: string): number {
 function statusToObj(s: string): { id: number } {
   const map: Record<string, number> = {
     'New': 1, 'Validation': 10, 'Assigned': 2,
-    'Planned': 3, 'Waiting': 4, 'Solved': 5, 'Closed': 6
+    'Planned': 3, 'Waiting': 4, 'Pending': 4, 'Solved': 5, 'Closed': 6
   };
   return { id: map[s] ?? parseInt(s) ?? 1 };
 }
@@ -104,10 +104,11 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// POST /tickets  — create ticket
+// POST /tickets  — create ticket + link assets via Legacy API
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { type, titre, description, priority, date, items } = req.body;
+    // items: Array<{ id: number; itemtype: string }> — passed from frontend
 
     const ticketData: Record<string, any> = {
       name:     titre       || '',
@@ -119,8 +120,35 @@ router.post('/', async (req: Request, res: Response) => {
     };
 
     const response = await glpiApiService.post('/Assistance/Ticket', ticketData);
+    const ticketId: number = response.id;
 
-    res.json({ success: true, id: response.id, ticket: normalizeTicket(response) });
+    // Link assets via Legacy API (High-Level API has no Item_Ticket endpoint)
+    const linkedItems: Array<{ id: number; itemtype: string; linked: boolean }> = [];
+    if (Array.isArray(items) && items.length > 0) {
+      for (const item of items) {
+        if (!item.id || !item.itemtype) continue;
+        try {
+          await glpiApiService.postLegacy('/Item_Ticket', {
+            input: {
+              tickets_id: ticketId,
+              itemtype:   item.itemtype,
+              items_id:   item.id,
+            }
+          });
+          linkedItems.push({ ...item, linked: true });
+        } catch (linkErr: any) {
+          console.warn(`Link asset ${item.itemtype}#${item.id} to ticket ${ticketId} failed:`, linkErr?.response?.data?.message || linkErr?.message);
+          linkedItems.push({ ...item, linked: false });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      id:      ticketId,
+      ticket:  normalizeTicket(response),
+      linked_items: linkedItems,
+    });
   } catch (error: any) {
     console.error('Create ticket failed:', error?.response?.data || error?.message);
     res.status(500).json({ error: 'Failed to create ticket' });
