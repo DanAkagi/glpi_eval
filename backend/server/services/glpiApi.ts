@@ -128,6 +128,28 @@ class GLPIApiService {
     return response.data;
   }
 
+  // Legacy API — used for relationships not exposed in the High-Level API:
+  // Item_Ticket (ticket↔asset link), Document_Item (document↔asset link)
+  // Base URL: /glpi/public/apirest.php  (derived from GLPI_API_URL)
+  async postLegacy(endpoint: string, data: any): Promise<any> {
+    await this.ensureAuthenticated();
+    const legacyBase = this.baseUrl.replace(/\/api\.php$/, '/apirest.php');
+    const response = await axios.post(`${legacyBase}${endpoint}`, data, {
+      headers: { ...this.authHeaders(), 'Content-Type': 'application/json' }
+    });
+    return response.data;
+  }
+
+  async getLegacy(endpoint: string, params?: Record<string, any>): Promise<any> {
+    await this.ensureAuthenticated();
+    const legacyBase = this.baseUrl.replace(/\/api\.php$/, '/apirest.php');
+    const response = await axios.get(`${legacyBase}${endpoint}`, {
+      headers: this.authHeaders(),
+      params
+    });
+    return response.data;
+  }
+
   // force=true → permanent delete (no soft-delete trash)
   async delete(endpoint: string, force = true): Promise<any> {
     await this.ensureAuthenticated();
@@ -154,4 +176,3 @@ class GLPIApiService {
 }
 
 export const glpiApiService = new GLPIApiService();
-
