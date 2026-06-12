@@ -27,10 +27,11 @@
           <label for="priority">Priority *</label>
           <select id="priority" v-model="ticket.priority" required>
             <option value="">Select priority</option>
+            <option value="Very Low">Very Low</option>
             <option value="Low">Low</option>
             <option value="Medium">Medium</option>
             <option value="High">High</option>
-            <option value="Urgent">Urgent</option>
+            <option value="Very High">Very High</option>
           </select>
         </div>
         <div class="form-group">
@@ -149,21 +150,19 @@ const submitTicket = async () => {
   success.value = '';
 
   try {
-    // Get next ticket reference
-    const ticketsResponse = await ticketsApi.getAll();
-    const maxRef = ticketsResponse.data.reduce((max: number, t: any) => Math.max(max, t.ref_ticket), 0);
-    const nextRef = maxRef + 1;
+    // Convert selected asset names to asset objects with id and itemtype
+    const items = selectedAssets.value.map(name => {
+      const asset = availableAssets.value.find(a => a.name === name);
+      return asset ? { id: asset.id, itemtype: 'Computer' } : null;
+    }).filter(Boolean);
 
     const ticketData = {
-      ref_ticket: nextRef,
-      date: ticket.value.date,
-      heure: ticket.value.heure,
       type: ticket.value.type,
       titre: ticket.value.titre,
       description: ticket.value.description,
-      status: 'New',
       priority: ticket.value.priority,
-      items: JSON.stringify(selectedAssets.value),
+      date: ticket.value.date,
+      items: items,
     };
 
     await ticketsApi.create(ticketData);
