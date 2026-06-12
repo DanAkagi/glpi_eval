@@ -56,7 +56,7 @@
           </div>
 
           <div v-if="ticketsByColumn(col.id).length === 0" class="empty-col">
-            Aucun ticket
+            Tsy misy ticket
           </div>
         </div>
       </div>
@@ -174,9 +174,42 @@
             <label>Date <span class="required">*</span></label>
             <input v-model="newTicket.date" type="date" />
           </div>
-          <p v-if="createError" class="error-msg">{{ createError }}</p>
-          <p v-if="createSuccess" class="success-msg">{{ createSuccess }}</p>
-        </div>
+          <div class="form-section">
+            <h2>Associated Assets</h2>
+              <div class="assets-selection">
+                <div class="search-assets">
+                  <input v-model="assetSearch" type="text" placeholder="Search assets by name..." @input="loadAssets" />
+                  <select v-model="assetTypeFilter" @change="loadAssets">
+                    <option value="">All Types</option>
+                    <option v-for="type in uniqueAssetTypes" :key="type" :value="type">{{ type }}</option>
+                  </select>
+                </div>
+                <div class="assets-list">
+                  <div v-if="loadingAssets" class="loading">Loading assets...</div>
+                  <div v-else-if="availableAssets.length === 0" class="empty">No assets available</div>
+                  <div v-else class="asset-items">
+                    <div v-for="asset in availableAssets" :key="asset.id" class="asset-item">
+                      <input 
+                        :id="`asset-${asset.id}`" 
+                        type="checkbox" 
+                        :value="asset.name"
+                        v-model="selectedAssets"
+                      />
+                      <label :for="`asset-${asset.id}`">
+                        <span class="asset-name">{{ asset.name }}</span>
+                        <span class="asset-info">({{ asset.item_type }} - {{ asset.location }})</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div class="selected-summary">
+                  <strong>{{ selectedAssets.length }} asset(s) selected</strong>
+                </div>
+              </div>
+            </div>
+            <p v-if="createError" class="error-msg">{{ createError }}</p>
+            <p v-if="createSuccess" class="success-msg">{{ createSuccess }}</p>
+          </div>
         <div class="modal-footer">
           <button class="btn-secondary" @click="showCreateModal = false">Annuler</button>
           <button class="btn-primary" :disabled="creatingTicket || !isCreateValid" @click="submitCreate">
@@ -190,7 +223,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { ticketsApi, kanbanApi } from '../services/api';
+import { ticketsApi, kanbanApi, assetsApi } from '../services/api';
 
 // ── State ─────────────────────────────────────────────
 const tickets = ref<any[]>([]);
@@ -204,6 +237,11 @@ const createError = ref('');
 const createSuccess = ref('');
 
 const newTicket = ref({ type: '', titre: '', description: '', priority: '', date: new Date().toISOString().split('T')[0] });
+const availableAssets = ref<any[]>([]);
+const selectedAssets = ref<string[]>([]);
+const loadingAssets = ref(false);
+const assetSearch = ref('');
+const assetTypeFilter = ref('');
 
 const draggedTicket = ref<any>(null);
 
@@ -221,7 +259,7 @@ const statusDialog = ref({
 // Maps column id ↔ GLPI status string
 const COL_TO_STATUS: Record<string, string[]> = {
   new:         ['New', 'Validation'],
-  in_progress: ['Assigned', 'Planned', 'Waiting'],
+  in_progress: ['Assigned', 'Planned', 'Waiting', 'In progress'],
   closed:      ['Solved', 'Closed'],
 };
 
@@ -242,6 +280,11 @@ const isCreateValid = computed(() =>
   newTicket.value.type && newTicket.value.titre && newTicket.value.priority && newTicket.value.date
 );
 
+const uniqueAssetTypes = computed(() => {
+  const types = new Set(availableAssets.value.map(a => a.item_type).filter(t => t));
+  return Array.from(types).sort();
+});
+
 function ticketsByColumn(colId: string) {
   return tickets.value.filter(t => (STATUS_TO_COL[t.status] || 'new') === colId);
 }
@@ -249,6 +292,7 @@ function ticketsByColumn(colId: string) {
 // ── Load data ──────────────────────────────────────────
 onMounted(async () => {
   await Promise.all([loadConfig(), loadTickets()]);
+  await loadAssets();
 });
 
 async function loadConfig() {
@@ -269,6 +313,22 @@ async function loadTickets() {
     console.error(e);
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadAssets() {
+  loadingAssets.value = true;
+  try {
+    const params: any = {};
+    if (assetSearch.value) params.name = assetSearch.value;
+    if (assetTypeFilter.value) params.item_type = assetTypeFilter.value;
+    
+    const response = await assetsApi.getAll(params);
+    availableAssets.value = response.data;
+  } catch (err) {
+    console.error('Failed to load assets:', err);
+  } finally {
+    loadingAssets.value = false;
   }
 }
 
@@ -335,7 +395,7 @@ async function applyStatusChange(ticket: any, targetColId: string, extra: any) {
   // Map column to GLPI status string
   const STATUS_MAP: Record<string, string> = {
     new: 'New',
-    in_progress: 'Assigned',
+    in_progress: 'In progress',
     closed: 'Closed',
   };
   const newStatus = STATUS_MAP[targetColId] || 'New';
@@ -371,6 +431,12 @@ async function submitCreate() {
   createSuccess.value = '';
 
   try {
+    // Convert selected asset names to asset objects with id and itemtype
+    const items = selectedAssets.value.map(name => {
+      const asset = availableAssets.value.find(a => a.name === name);
+      return asset ? { id: asset.id, itemtype: 'Computer' } : null;
+    }).filter(Boolean);
+
     await ticketsApi.create({
       type: newTicket.value.type,
       titre: newTicket.value.titre,
@@ -378,10 +444,15 @@ async function submitCreate() {
       priority: newTicket.value.priority,
       date: newTicket.value.date,
       status: 'New',
+      items: items,
     });
     createSuccess.value = 'Ticket créé avec succès !';
     newTicket.value = { type: '', titre: '', description: '', priority: '', date: new Date().toISOString().split('T')[0] };
+    selectedAssets.value = [];
+    assetSearch.value = '';
+    assetTypeFilter.value = '';
     await loadTickets();
+    await loadAssets();
     setTimeout(() => { showCreateModal.value = false; createSuccess.value = ''; }, 1500);
   } catch (e: any) {
     createError.value = e.response?.data?.error || 'Erreur lors de la création.';
@@ -738,6 +809,147 @@ function priorityClass(p: string) {
 
 .error-msg  { color: #dc2626; font-size: .85rem; margin-top: .5rem; }
 .success-msg { color: #16a34a; font-size: .85rem; margin-top: .5rem; }
+
+.loading-assets, .no-assets {
+  font-size: .85rem;
+  color: #6b7280;
+  padding: .5rem;
+  text-align: center;
+}
+
+.assets-checkboxes {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1.5px solid #d1d5db;
+  border-radius: 7px;
+  padding: .5rem;
+}
+
+.asset-checkbox {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .3rem;
+  cursor: pointer;
+}
+
+.asset-checkbox:hover {
+  background: #f3f4f6;
+  border-radius: 4px;
+}
+
+.asset-checkbox input {
+  cursor: pointer;
+}
+
+.asset-checkbox span {
+  font-size: .85rem;
+  color: #374151;
+}
+
+.form-section {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.form-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.form-section h2 {
+  margin: 0 0 1rem 0;
+  color: #2c3e50;
+  font-size: 1rem;
+}
+
+.assets-selection {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 1rem;
+}
+
+.search-assets {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.search-assets input {
+  flex: 1;
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.search-assets select {
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  min-width: 150px;
+}
+
+.assets-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.loading,
+.empty {
+  text-align: center;
+  padding: 1rem;
+  color: #7f8c8d;
+}
+
+.asset-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.asset-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.asset-item:hover {
+  background-color: #f8f9fa;
+}
+
+.asset-item label {
+  flex: 1;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.asset-name {
+  font-weight: 500;
+  color: #2c3e50;
+}
+
+.asset-info {
+  font-size: 0.875rem;
+  color: #7f8c8d;
+}
+
+.selected-summary {
+  margin-top: 1rem;
+  padding: 0.5rem;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  color: #2c3e50;
+}
 
 /* ── Buttons ───────────────────────────────── */
 .btn-primary {

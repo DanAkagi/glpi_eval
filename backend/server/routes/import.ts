@@ -279,8 +279,8 @@ function mapTicketStatus(status: string): number {
     'New': 1, 'Nouveau': 1,
     'Assigned': 2, 'Attribué': 2,
     'Planned': 3, 'Planifié': 3,
-    'Waiting': 4, 'En attente': 4,
-    'Pending': 4, 'In progress': 4, 
+    'In progress': 4, 'Waiting': 4, 
+    'En attente': 4, 'Pending': 4,
     'Solved': 5, 'Résolu': 5,
     'Closed': 6, 'Clos': 6,
   };

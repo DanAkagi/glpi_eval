@@ -161,7 +161,7 @@ const loading = ref(false);
 const openTickets = computed(() => {
   if (!stats.value) return 0;
   return (stats.value.tickets.byStatus || [])
-    .filter((s: any) => ['New', 'Assigned', 'Planned', 'Waiting'].includes(s.label))
+    .filter((s: any) => ['New', 'Assigned', 'Planned', 'Waiting', 'In progress'].includes(s.label))
     .reduce((acc: number, s: any) => acc + s.count, 0);
 });
 

@@ -5,7 +5,7 @@ const router = Router();
 
 const TICKET_STATUS: Record<number, string> = {
   1: 'New', 10: 'Validation', 2: 'Assigned',
-  3: 'Planned', 4: 'Waiting', 5: 'Solved', 6: 'Closed'
+  3: 'Planned', 4: 'In progress', 5: 'Solved', 6: 'Closed'
 };
 const TICKET_TYPE: Record<number, string> = { 1: 'Incident', 2: 'Request' };
 const TICKET_PRIORITY: Record<number, string> = {
