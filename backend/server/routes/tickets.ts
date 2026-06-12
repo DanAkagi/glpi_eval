@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
-import { glpiApiService, ASSET_ITEM_TYPES, CSV_TYPE_TO_GLPI, AssetItemType } from '../services/glpiApi.js';
+import { glpiApiService } from '../services/glpiApi.js';
 
 const router = Router();
 
 // GLPI status id → human label
 const TICKET_STATUS: Record<number, string> = {
   1: 'New', 10: 'Validation', 2: 'Assigned',
-  3: 'Planned', 4: 'In progress', 5: 'Solved', 6: 'Closed'
+  3: 'Planned', 4: 'Waiting', 5: 'Solved', 6: 'Closed'
 };
 
 // GLPI type int → human label
@@ -64,7 +64,7 @@ function typeToInt(t: string): number {
 function statusToObj(s: string): { id: number } {
   const map: Record<string, number> = {
     'New': 1, 'Validation': 10, 'Assigned': 2,
-    'Planned': 3, 'In progresss': 4, 'Waiting': 4, 'Pending': 4, 'Solved': 5, 'Closed': 6
+    'Planned': 3, 'Waiting': 4, 'Pending': 4, 'Solved': 5, 'Closed': 6
   };
   return { id: map[s] ?? parseInt(s) ?? 1 };
 }
@@ -98,9 +98,27 @@ router.get('/:id', async (req: Request, res: Response) => {
       ticket.costs = [];
     }
 
-    // Fetch linked assets via High-Level API (items field)
-    if (response._item_names) {
-      ticket.items = response._item_names;
+    // Fetch linked assets via Legacy API (Item_Ticket collection)
+    try {
+      const allLinks = await glpiApiService.getLegacy('/Item_Ticket', { range: '0-9999' });
+      const links = (Array.isArray(allLinks) ? allLinks : [])
+        .filter((l: any) => Number(l.tickets_id) === ticketId);
+
+      const linkedItems: Array<{ id: number; itemtype: string; name?: string }> = [];
+      for (const link of links) {
+        const it = link.itemtype;
+        const id = link.items_id;
+        if (!it || !id) continue;
+        try {
+          const item = await glpiApiService.get(`/Assets/${it}/${id}`);
+          linkedItems.push({ id, itemtype: it, name: item?.name });
+        } catch {
+          linkedItems.push({ id, itemtype: it });
+        }
+      }
+      ticket.items = linkedItems;
+    } catch (e: any) {
+      console.error(`Failed to fetch linked items for ticket ${ticketId}:`, e?.response?.data || e?.message);
     }
 
     res.json(ticket);
@@ -109,87 +127,54 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// POST /tickets  — create a new ticket with dynamic asset resolution
+// POST /tickets  — create ticket + link assets via Legacy API
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { titre, description, type, priority, date, items } = req.body;
+    const { type, titre, description, priority, date, items } = req.body;
+    // items: Array<{ id: number; itemtype: string }> — passed from frontend
 
-    if (!titre) {
-      return res.status(400).json({ error: 'Title is required' });
-    }
-
-    const dateValue = date || new Date().toISOString().slice(0, 19).replace('T', ' ');
-
-    // Structure de base du ticket pour GLPI
     const ticketData: Record<string, any> = {
       name:     titre       || '',
       content:  description || '',
       type:     typeToInt(type),
-      status:   { id: 1 }, // Statut: New
+      status:   { id: 1 }, // New
       priority: priorityToInt(priority || 'Medium'),
-      date:     dateValue,
+      date:     date ? new Date(date).toISOString() : new Date().toISOString(),
     };
 
-    // ── BLOC DE RÉSOLUTION DES ASSETS ────────────────────────────────────────
-    if (Array.isArray(items) && items.length > 0) {
-      const resolvedGlpiItems: { itemtype: string; items_id: number }[] = [];
-      
-      // 1. Récupérer tous les types d'assets configurés dans votre GLPI
-      const assetTypes = await glpiApiService.getAssetItemTypes();
-
-      // 2. Pour chaque critère de recherche envoyé par le frontend
-      for (const itemSearchKey of items) {
-        if (!itemSearchKey || typeof itemSearchKey !== 'string') continue;
-
-        let assetFound = false;
-
-        // 3. Parcourir les types d'assets (comme dans assets.ts) pour trouver une correspondance
-        for (const itemType of assetTypes) {
-          try {
-            // Recherche par nom ou numéro d'inventaire (otherserial) via l'API GLPI
-            // Vous pouvez ajuster les filtres selon ce que le frontend envoie (ex: ?searchText[name]=...)
-            const searchResponse = await glpiApiService.get(`/Assets/${itemType}`, {
-              'searchText[name]': itemSearchKey.trim()
-            });
-
-            // Si GLPI retourne un résultat valide
-            if (Array.isArray(searchResponse) && searchResponse.length > 0) {
-              const matchedAsset = searchResponse[0]; // On prend le premier élément qui matche
-              
-              resolvedGlpiItems.push({
-                itemtype: itemType,      // ex: "Computer"
-                items_id: matchedAsset.id // ex: 123
-              });
-              
-              console.log(`[Ticket Service] Asset résolu : "${itemSearchKey}" ➔ ${itemType} ID #${matchedAsset.id}`);
-              assetFound = true;
-              break; // Arrêter de chercher dans les autres types pour cet item
-            }
-          } catch (err) {
-            // On ignore silencieusement les types d'assets non configurés ou vides
-          }
-        }
-
-        if (!assetFound) {
-          console.warn(`[Ticket Service] Impossible de trouver l'asset correspondant à : "${itemSearchKey}"`);
-        }
-      }
-
-      // 4. Assigner les items résolus au payload du ticket si on en a trouvé
-      if (resolvedGlpiItems.length > 0) {
-        ticketData.items = resolvedGlpiItems;
-      }
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Envoi du payload normalisé et lié à GLPI
     const response = await glpiApiService.post('/Assistance/Ticket', ticketData);
     const ticketId: number = response.id;
+
+    // Link assets via Legacy API (High-Level API has no Item_Ticket endpoint)
+    const linkedItems: Array<{ id: number; itemtype: string; name?: string; linked: boolean }> = [];
+    if (Array.isArray(items) && items.length > 0) {
+      for (const item of items) {
+        const itemType = item.itemtype || item.item_type;
+        if (!item.id || !itemType) continue;
+        try {
+          await glpiApiService.postLegacy('/Item_Ticket', {
+            input: {
+              tickets_id: ticketId,
+              itemtype:   itemType,
+              items_id:   item.id,
+            }
+          });
+          linkedItems.push({ id: item.id, itemtype: itemType, name: item.name, linked: true });
+        } catch (linkErr: any) {
+          console.warn(`Link asset ${itemType}#${item.id} to ticket ${ticketId} failed:`, linkErr?.response?.data?.message || linkErr?.message);
+          linkedItems.push({ id: item.id, itemtype: itemType, name: item.name, linked: false });
+        }
+      }
+    }
+
+    const normalized = normalizeTicket(response);
+    normalized.items = linkedItems;
 
     res.json({
       success: true,
       id:      ticketId,
-      ticket:  normalizeTicket(response),
+      ticket:  normalized,
+      linked_items: linkedItems,
     });
   } catch (error: any) {
     console.error('Create ticket failed:', error?.response?.data || error?.message);
