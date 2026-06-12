@@ -127,10 +127,21 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
+function parseDateTime(dateStr: string, timeStr: string): string {
+  if (!dateStr) return new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const parts = dateStr.trim().split('/');
+  if (parts.length === 3) {
+    const [day, month, year] = parts;
+    const time = timeStr?.trim() || '00:00';
+    return `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')} ${time}:00`;
+  }
+  return dateStr;
+}
+
 // POST /tickets  — create ticket + link assets via Legacy API
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { type, titre, description, priority, date, items } = req.body;
+    const { type, titre, description, priority, date, heure, items } = req.body;
     // items: Array<{ id: number; itemtype: string }> — passed from frontend
 
     const ticketData: Record<string, any> = {
@@ -139,7 +150,7 @@ router.post('/', async (req: Request, res: Response) => {
       type:     typeToInt(type),
       status:   { id: 1 }, // New
       priority: priorityToInt(priority || 'Medium'),
-      date:     date ? new Date(date).toISOString() : new Date().toISOString(),
+      date:     parseDateTime(date, heure),
     };
 
     const response = await glpiApiService.post('/Assistance/Ticket', ticketData);

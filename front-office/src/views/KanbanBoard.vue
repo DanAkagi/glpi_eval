@@ -178,6 +178,10 @@
             <label>Date <span class="required">*</span></label>
             <input v-model="newTicket.date" type="date" />
           </div>
+          <div class="form-group">
+            <label for="heure">Time *</label>
+            <input id="heure" v-model="newTicket.heure" type="time" required />
+          </div>
 
           <div class="form-group">
             <label>Assets associés</label>
@@ -424,6 +428,7 @@ async function submitCreate() {
       description: newTicket.value.description,
       priority: newTicket.value.priority,
       date: newTicket.value.date,
+      date: newTicket.value.heure,
       status: 'New',
       items: selectedAssets.value.map(a => ({ id: a.id, item_type: a.item_type, name: a.name })),
     });

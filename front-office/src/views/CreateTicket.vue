@@ -162,6 +162,7 @@ const submitTicket = async () => {
       description: ticket.value.description,
       priority: ticket.value.priority,
       date: ticket.value.date,
+      heure: ticket.value.heure,
       items: items,
     };
 
