@@ -249,9 +249,9 @@ const STATUS_ALIASES: Record<string, string> = {
   'In stock':       'En stock',
   'En réparation':  'En réparation',
   'Under repair':   'En réparation',
-  'En panne':       'En réparation',
-  'Broken':         'En réparation',
-  'Maintenance':    'En réparation',
+  'En panne':       'En panne',
+  'Broken':         'En panne',
+  'Maintenance':    'En maintenance',
   'Hors service':   'Hors service',
   'Out of service': 'Hors service',
   'Volé':           'Volé',
@@ -280,7 +280,7 @@ function mapTicketStatus(status: string): number {
     'Assigned': 2, 'Attribué': 2,
     'Planned': 3, 'Planifié': 3,
     'Waiting': 4, 'En attente': 4,
-    'Pending': 4,  // Map Pending to Waiting (status 4)
+    'Pending': 4, 'In progress': 4, 
     'Solved': 5, 'Résolu': 5,
     'Closed': 6, 'Clos': 6,
   };
