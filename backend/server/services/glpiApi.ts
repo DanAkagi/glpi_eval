@@ -44,6 +44,7 @@ class GLPIApiService {
   private legacyBaseUrl: string;
   private clientId: string;
   private clientSecret: string;
+  private appToken: string;
   private username: string;
   private password: string;
 
@@ -60,6 +61,7 @@ class GLPIApiService {
     this.legacyBaseUrl = this.baseUrl.replace(/\/api\.php$/, '/apirest.php');
     this.clientId      = process.env.GLPI_CLIENT_ID || '';
     this.clientSecret  = process.env.GLPI_CLIENT_SECRET || '';
+    this.appToken      = process.env.GLPI_APP_TOKEN || '';
     this.username      = process.env.GLPI_USERNAME || 'glpi';
     this.password      = process.env.GLPI_PASSWORD || 'glpi';
   }
@@ -108,7 +110,7 @@ class GLPIApiService {
     const response = await axios.get(`${this.legacyBaseUrl}/initSession`, {
       headers: {
         Authorization: `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`,
-        'App-Token':   this.clientId,
+        'App-Token':   this.appToken,
         'User-Agent':  'Mozilla/5.0',
       }
     });
@@ -128,7 +130,7 @@ class GLPIApiService {
   private legacyHeaders() {
     return {
       'Session-Token': this.sessionToken!,
-      'App-Token':     this.clientId,
+      'App-Token':     this.appToken,
       'Content-Type':  'application/json',
       'User-Agent':    'Mozilla/5.0',
     };

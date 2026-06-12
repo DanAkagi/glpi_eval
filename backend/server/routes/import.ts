@@ -37,6 +37,7 @@ function parseCSV(buffer: Buffer): Promise<any[]> {
 // Results are cached in-memory per import run to avoid duplicate API calls.
 
 const cache: Record<string, Record<string, number>> = {
+  state: {},
   location: {},
   manufacturer: {},
   computermodel: {},
@@ -60,10 +61,10 @@ async function resolveId(
     return cache[entityType][key];
   }
 
-  // Search existing — try filtered search first
+  // Search existing — try filtered search first (RSQL: quote values with spaces)
   try {
     const results = await glpiApiService.get(apiPath, {
-      filter: `name==${name.trim()}`,
+      filter: `name=="${name.trim()}"`,
       limit: 1,
     });
     if (Array.isArray(results) && results.length > 0) {
@@ -71,7 +72,10 @@ async function resolveId(
       cache[entityType][key] = id;
       return id;
     }
-  } catch { /* filter search failed, fall through to full list */ }
+    console.log(`[GLPI DEBUG] Filtered search for ${entityType} "${name.trim()}" returned:`, JSON.stringify(results));
+  } catch (e: any) {
+    console.log(`[GLPI DEBUG] Filtered search for ${entityType} "${name.trim()}" THREW:`, JSON.stringify(e?.response?.data || e?.message));
+  }
 
   // Fallback: list all and match by name (handles accents / filter syntax issues)
   try {
@@ -82,8 +86,13 @@ async function resolveId(
         cache[entityType][key] = match.id;
         return match.id;
       }
+      console.log(`[GLPI DEBUG] Full list for ${entityType} (${all.length} items) had no match for "${name.trim()}". Names:`, JSON.stringify(all.map((i: any) => i.name)));
+    } else {
+      console.log(`[GLPI DEBUG] Full list for ${entityType} did not return an array:`, JSON.stringify(all));
     }
-  } catch { /* full list failed too, try create */ }
+  } catch (e: any) {
+    console.log(`[GLPI DEBUG] Full list for ${entityType} THREW:`, JSON.stringify(e?.response?.data || e?.message));
+  }
 
   // Create — Location and other tree dropdowns require entity:{id:0}
   const isHierarchical = ['location'].includes(entityType);
@@ -98,6 +107,7 @@ async function resolveId(
     console.log(`[GLPI] Created ${entityType} "${name.trim()}" → ID ${id}`);
     return id;
   } catch (e: any) {
+    console.log(`[GLPI DEBUG] Create ${entityType} "${name.trim()}" failed with:`, JSON.stringify(e?.response?.data));
     // Creation failed — likely because it already exists (duplicate name constraint).
     // Retry the full-list match as a last resort.
     try {

@@ -42,7 +42,7 @@
                   <td><span class="badge bg-info">{{ ticket.status }}</span></td>
                   <td><span class="badge bg-warning text-dark">{{ ticket.priority }}</span></td>
                   <td>
-                    <button @click="viewTicket(ticket.ref_ticket)" class="btn btn-sm btn-primary">
+                    <button @click="viewTicket(ticket.id)" class="btn btn-sm btn-primary">
                       <i class="bi bi-eye me-1"></i>View
                     </button>
                   </td>
@@ -138,9 +138,9 @@ onMounted(async () => {
   }
 });
 
-const viewTicket = async (refTicket: number) => {
+const viewTicket = async (id: number) => {
   try {
-    const response = await ticketsApi.getById(refTicket.toString());
+    const response = await ticketsApi.getById(id.toString());
     selectedTicket.value = response.data;
   } catch (error) {
     console.error('Failed to load ticket:', error);
