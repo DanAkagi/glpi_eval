@@ -26,6 +26,10 @@ export const kanbanApi = {
   updateConfig: (data: any) => api.put('/kanban/config', data),
 };
 
+export const costsApi = {
+  create: (data: any) => api.post('/kanban/super-costs', data),
+};
+
 export const documentsApi = {
   getForAsset: (itemtype: string, itemsId: string) => api.get(`/documents/asset/${itemtype}/${itemsId}`),
 };

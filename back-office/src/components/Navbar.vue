@@ -24,6 +24,10 @@
         <i class="bi bi-kanban-fill"></i>
         <span>Kanban</span>
       </router-link>
+      <router-link to="/costs-by-assets" class="nav-item">
+        <i class="bi bi-coin"></i>
+        <span>Costs</span>
+      </router-link>
       <router-link to="/assets" class="nav-item">
         <i class="bi bi-pc-display"></i>
         <span>Assets</span>

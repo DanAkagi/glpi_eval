@@ -4,6 +4,7 @@ import Dashboard from '../views/Dashboard.vue'
 import Tickets from '../views/Tickets.vue'
 import Import from '../views/Import.vue'
 import Reset from '../views/Reset.vue'
+import CostsByAssets from '../views/CostsByAssets.vue'
 import Assets from '../views/Assets.vue'
 import AssetDetail from '../views/AssetDetail.vue'
 import KanbanSettings from '../views/KanbanSettings.vue'
@@ -56,6 +57,12 @@ const router = createRouter({
       path: '/kanban-settings',
       name: 'kanban-settings',
       component: KanbanSettings,
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/costs-by-assets',
+      name: 'costs-by-assets',
+      component: CostsByAssets,
       meta: { requiresAuth: true }
     },
     {

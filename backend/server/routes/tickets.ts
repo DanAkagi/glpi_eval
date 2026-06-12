@@ -196,7 +196,7 @@ router.post('/', async (req: Request, res: Response) => {
 // PATCH /tickets/:id  — update ticket
 router.patch('/:id', async (req: Request, res: Response) => {
   try {
-    const { status, priority, type, ...rest } = req.body;
+    const { status, super_cost, priority, type, ...rest } = req.body;
 
     const updateData: Record<string, any> = { ...rest };
     if (status)   updateData.status   = statusToObj(status);

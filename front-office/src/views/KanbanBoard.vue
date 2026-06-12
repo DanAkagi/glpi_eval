@@ -56,7 +56,7 @@
           </div>
 
           <div v-if="ticketsByColumn(col.id).length === 0" class="empty-col">
-            Aucun ticket
+            Tsy misy ticket
           </div>
         </div>
       </div>
@@ -123,6 +123,11 @@
           <div v-if="statusDialog.targetId === 'closed'" class="form-group">
             <label>Motif de clôture <span class="required">*</span></label>
             <textarea v-model="statusDialog.resolution" rows="3" placeholder="Décrivez la résolution du ticket…"></textarea>
+          </div>
+
+          <div v-if="statusDialog.targetId === 'closed'" class="form-group">
+            <label>Coût supplémentaire<span class="required">*</span></label>
+            <input v-model="statusDialog.super_cost" type="number" min="0" step="0.01" placeholder="Ex:10.0"></input>
           </div>
 
           <!-- In progress requires assignee -->
@@ -218,7 +223,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { ticketsApi, kanbanApi, assetsApi } from '../services/api';
+import { ticketsApi, costsApi, kanbanApi, assetsApi } from '../services/api';
 
 // ── State ─────────────────────────────────────────────
 const tickets = ref<any[]>([]);
@@ -263,6 +268,7 @@ const statusDialog = ref({
   targetId: '',
   targetLabel: '',
   resolution: '',
+  super_cost: 0 as Number,
   assignee: '',
   error: '',
 });
@@ -348,12 +354,13 @@ async function onDrop(e: DragEvent, targetColId: string) {
       targetId: targetColId,
       targetLabel,
       resolution: '',
+      super_cost: 0 as Number,
       assignee: '',
       error: '',
     };
   } else {
     // Direct move to "new"
-    await applyStatusChange(ticket, targetColId, {});
+    await applyStatusChange(ticket, targetColId, 0, {});
   }
 }
 
@@ -374,6 +381,17 @@ async function confirmStatusChange() {
   if (d.assignee) extra.assignee = d.assignee;
 
   await applyStatusChange(d.ticket, d.targetId, extra);
+
+  if (d.targetId === 'closed' && d.super_cost && Number(d.super_cost) > 0) {
+    try {
+      await costsApi.create({
+        ticket_id: d.ticket.id,
+        amount: Number(d.super_cost),
+      })
+    } catch (e) {
+      console.error('Erreur en ajout de super cost:', e);
+    } 
+  }
   statusDialog.value.show = false;
 }
 

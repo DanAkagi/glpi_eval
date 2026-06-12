@@ -72,6 +72,10 @@ export const assetsApi = {
   getById: (id: string) => api.get(`/assets/${id}`),
 };
 
+export const costsApi = {
+  getByAssetType: () => api.get('/kanban/costs-by-asset-type'),
+};
+
 export const documentsApi = {
   getForAsset: (itemtype: string, itemsId: string) => api.get(`/documents/asset/${itemtype}/${itemsId}`),
 };
