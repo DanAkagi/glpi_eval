@@ -89,11 +89,17 @@
                   <label class="fw-bold text-muted">Priority:</label>
                   <div><span class="badge bg-warning text-dark">{{ selectedTicket.priority }}</span></div>
                 </div>
-                <div class="col-12">
-                  <label class="fw-bold text-muted">Associated Assets:</label>
-                  <div v-if="!selectedTicket.items || selectedTicket.items === '[]'" class="text-muted">No assets</div>
-                  <div v-else class="alert alert-secondary">{{ selectedTicket.items }}</div>
+                <div class="col-12" v-if="selectedTicket.items && selectedTicket.items.length > 0">
+                  <span class="dl">Assets associés</span>
+                  <div class="assets-list">
+                    <div v-for="(item, i) in selectedTicket.items" :key="i" class="asset-chip" :class="`asset-${(item.itemtype || 'default').toLowerCase()}`">
+                      <span class="asset-chip-icon">{{ assetIcon(item.itemtype) }}</span>
+                      <span class="asset-chip-name">{{ item.name || `#${item.id}` }}</span>
+                      <span class="asset-chip-type">{{ item.itemtype }}</span>
+                    </div>
+                  </div>
                 </div>
+                <div v-else class="text-muted">No assets</div>
                 <div class="col-12" v-if="selectedTicket.costs && selectedTicket.costs.length > 0">
                   <label class="fw-bold text-muted">Costs:</label>
                   <div class="list-group mt-2">
@@ -146,6 +152,15 @@ const viewTicket = async (id: number) => {
     console.error('Failed to load ticket:', error);
   }
 };
+
+function assetIcon(itemtype: string) {
+  const map: Record<string, string> = {
+    Computer: '🖥️', Monitor: '🖵', NetworkEquipment: '📡', Peripheral: '🖱️',
+    Phone: '📱', Printer: '🖨️', SoftwareLicense: '💿', Certificate: '📜',
+    Appliance: '⚙️', Unmanaged: '❓',
+  };
+  return map[itemtype] || '📦';
+}
 
 const closeModal = () => {
   selectedTicket.value = null;
