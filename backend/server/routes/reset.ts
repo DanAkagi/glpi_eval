@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { glpiApiService, ASSET_ITEM_TYPES } from '../services/glpiApi.js';
 
 const router = Router();
@@ -45,6 +47,43 @@ router.post('/', async (req, res) => {
       results['Ticket'] = deletedTickets;
     } catch (e: any) {
       errors.push(`Fetch tickets: ${e?.message}`);
+    }
+
+    // 4. Delete all Documents (GLPI Management/Document) + local image files
+    try {
+      const documents = await glpiApiService.get('/Management/Document', { limit: 10000 });
+      let deletedDocs = 0;
+      for (const doc of (documents || [])) {
+        try {
+          await glpiApiService.delete(`/Management/Document/${doc.id}`, true);
+          deletedDocs++;
+        } catch (e: any) {
+          errors.push(`Delete Document#${doc.id}: ${e?.message}`);
+        }
+      }
+      results['Document'] = deletedDocs;
+    } catch (e: any) {
+      errors.push(`Fetch documents: ${e?.message}`);
+    }
+
+    // 5. Clear local image files in public/images
+    try {
+      const imagesDir = path.join(process.cwd(), 'public', 'images');
+      if (fs.existsSync(imagesDir)) {
+        const files = fs.readdirSync(imagesDir);
+        let deletedFiles = 0;
+        for (const file of files) {
+          try {
+            fs.unlinkSync(path.join(imagesDir, file));
+            deletedFiles++;
+          } catch (e: any) {
+            errors.push(`Delete file ${file}: ${e?.message}`);
+          }
+        }
+        results['ImageFiles'] = deletedFiles;
+      }
+    } catch (e: any) {
+      errors.push(`Clear image files: ${e?.message}`);
     }
 
     res.json({

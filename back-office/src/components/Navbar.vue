@@ -20,6 +20,10 @@
         <i class="bi bi-ticket-perforated-fill"></i>
         <span>Tickets</span>
       </router-link>
+      <router-link to="/kanban-settings" class="nav-item">
+        <i class="bi bi-kanban-fill"></i>
+        <span>Kanban</span>
+      </router-link>
       <router-link to="/assets" class="nav-item">
         <i class="bi bi-pc-display"></i>
         <span>Assets</span>

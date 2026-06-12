@@ -59,6 +59,12 @@ export const ticketsApi = {
   getAll: () => api.get('/tickets'),
   getById: (id: string) => api.get(`/tickets/${id}`),
   create: (data: any) => api.post('/tickets', data),
+  update: (id: number, data: any) => api.patch(`/tickets/${id}`, data),
+};
+
+export const kanbanApi = {
+  getConfig: () => api.get('/kanban/config'),
+  updateConfig: (data: any) => api.put('/kanban/config', data),
 };
 
 export const assetsApi = {

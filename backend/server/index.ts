@@ -12,6 +12,7 @@ import ticketRoutes from './routes/tickets.js';
 import assetRoutes from './routes/assets.js';
 import resetRoutes from './routes/reset.js';
 import documentRoutes from './routes/documents.js';
+import kanbanRoutes from './routes/kanban.js';
 
 const app = express();
 const server = createServer(app);
@@ -44,6 +45,7 @@ app.use('/api/stats', statsRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/assets', assetRoutes);
 app.use('/api/documents', documentRoutes);
+app.use('/api/kanban', kanbanRoutes);
 app.use('/api/reset', resetRoutes);
 
 // Health check

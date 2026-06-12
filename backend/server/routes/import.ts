@@ -60,7 +60,7 @@ async function resolveId(
     return cache[entityType][key];
   }
 
-  // Search existing
+  // Search existing — try filtered search first
   try {
     const results = await glpiApiService.get(apiPath, {
       filter: `name==${name.trim()}`,
@@ -71,7 +71,19 @@ async function resolveId(
       cache[entityType][key] = id;
       return id;
     }
-  } catch { /* not found or endpoint error, try create */ }
+  } catch { /* filter search failed, fall through to full list */ }
+
+  // Fallback: list all and match by name (handles accents / filter syntax issues)
+  try {
+    const all = await glpiApiService.get(apiPath, { limit: 1000 });
+    if (Array.isArray(all)) {
+      const match = all.find((item: any) => item.name?.trim().toLowerCase() === key);
+      if (match) {
+        cache[entityType][key] = match.id;
+        return match.id;
+      }
+    }
+  } catch { /* full list failed too, try create */ }
 
   // Create — Location and other tree dropdowns require entity:{id:0}
   const isHierarchical = ['location'].includes(entityType);
@@ -86,6 +98,19 @@ async function resolveId(
     console.log(`[GLPI] Created ${entityType} "${name.trim()}" → ID ${id}`);
     return id;
   } catch (e: any) {
+    // Creation failed — likely because it already exists (duplicate name constraint).
+    // Retry the full-list match as a last resort.
+    try {
+      const all = await glpiApiService.get(apiPath, { limit: 1000 });
+      if (Array.isArray(all)) {
+        const match = all.find((item: any) => item.name?.trim().toLowerCase() === key);
+        if (match) {
+          cache[entityType][key] = match.id;
+          console.log(`[GLPI] Resolved ${entityType} "${name.trim()}" → ID ${match.id} (post-create-failure lookup)`);
+          return match.id;
+        }
+      }
+    } catch { /* give up */ }
     console.warn(`[GLPI] Could not create ${entityType} "${name}": ${e?.response?.data?.title || e?.message}`);
     return undefined;
   }

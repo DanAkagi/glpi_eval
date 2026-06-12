@@ -1,0 +1,22 @@
+{
+  "columns": [
+    {
+      "id": "new",
+      "label": "New",
+      "labelMg": "Vaovao",
+      "color": "#e3f2fd"
+    },
+    {
+      "id": "in_progress",
+      "label": "In Progress",
+      "labelMg": "Efa manao",
+      "color": "#fff8e1"
+    },
+    {
+      "id": "closed",
+      "label": "Closed",
+      "labelMg": "Vita",
+      "color": "#e8f5e9"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import Import from '../views/Import.vue'
 import Reset from '../views/Reset.vue'
 import Assets from '../views/Assets.vue'
 import AssetDetail from '../views/AssetDetail.vue'
+import KanbanSettings from '../views/KanbanSettings.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -49,6 +50,12 @@ const router = createRouter({
       path: '/reset',
       name: 'reset',
       component: Reset,
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/kanban-settings',
+      name: 'kanban-settings',
+      component: KanbanSettings,
       meta: { requiresAuth: true }
     },
     {

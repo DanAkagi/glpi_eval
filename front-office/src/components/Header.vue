@@ -5,8 +5,9 @@
         <h1>GLPI Front-Office</h1>
       </div>
       <nav class="nav">
+        <router-link to="/kanban" class="nav-link">Kanban</router-link>
         <router-link to="/assets" class="nav-link">Assets</router-link>
-        <router-link to="/create-ticket" class="nav-link">Create Ticket</router-link>
+        <router-link to="/create-ticket" class="nav-link">Créer un ticket</router-link>
       </nav>
     </div>
   </header>

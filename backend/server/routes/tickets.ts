@@ -98,6 +98,28 @@ router.get('/:id', async (req: Request, res: Response) => {
       ticket.costs = [];
     }
 
+    // Fetch linked assets via Legacy API (Item_Ticket search)
+    try {
+      const links = await glpiApiService.getLegacy('/Item_Ticket', {
+        searchText: { tickets_id: ticketId },
+      });
+      const linkedItems: Array<{ id: number; itemtype: string; name?: string }> = [];
+      for (const link of (links || [])) {
+        const it = link.itemtype;
+        const id = link.items_id;
+        if (!it || !id) continue;
+        try {
+          const item = await glpiApiService.get(`/Assets/${it}/${id}`);
+          linkedItems.push({ id, itemtype: it, name: item?.name });
+        } catch {
+          linkedItems.push({ id, itemtype: it });
+        }
+      }
+      ticket.items = linkedItems;
+    } catch (e) {
+      console.error('Failed to fetch linked items for ticket', ticketId, e);
+    }
+
     res.json(ticket);
   } catch (error) {
     res.status(500).json({ error: 'Failed to get ticket' });
